@@ -5,7 +5,7 @@
   "main": "dist/server.js",
   "scripts": {
     "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
-    "build": "tsc",
+    "build": "rm -rf dist && tsc",
     "start": "node dist/server.js",
     "verify": "./node_modules/.bin/ts-node src/verify-certificate.ts",
     "test": "node --experimental-vm-modules node_modules/.bin/jest"
