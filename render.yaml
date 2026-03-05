@@ -1,0 +1,46 @@
+services:
+  - type: web
+    name: borealismark-api
+    runtime: node
+    buildCommand: npm install && npx tsc
+    startCommand: node dist/server.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3001
+      # Hedera
+      - key: HEDERA_NETWORK
+        sync: false
+      - key: HEDERA_ACCOUNT_ID
+        sync: false
+      - key: HEDERA_PRIVATE_KEY
+        sync: false
+      - key: HEDERA_AUDIT_TOPIC_ID
+        sync: false
+      - key: HEDERA_USDC_TOKEN_ID
+        value: "0.0.456858"
+      - key: HEDERA_TREASURY_ACCOUNT_ID
+        value: "0.0.10277625"
+      - key: HEDERA_MIRROR_NODE_URL
+        value: "https://testnet.mirrornode.hedera.com"
+      # Auth
+      - key: API_MASTER_KEY
+        generateValue: true
+      - key: JWT_SECRET
+        generateValue: true
+      # Stripe
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_PUBLISHABLE_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: FRONTEND_URL
+        sync: false
+    healthCheckPath: /health
+    autoDeploy: true
+    disk:
+      name: borealismark-data
+      mountPath: /app/data
+      sizeGB: 1

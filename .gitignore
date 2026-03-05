@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+node_modules_old/
+
+# Build output
+dist/
+
+# Environment (secrets)
+.env
+.env.local
+.env.production
+
+# Database
+*.db
+*.db-wal
+*.db-shm
+data/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+npm-debug.log*
