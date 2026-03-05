@@ -22,12 +22,23 @@ import {
   updateUserRole,
 } from '../db/database';
 import { logger } from '../middleware/logger';
+import { authLimiter } from '../middleware/rateLimiter';
 
 const router = Router();
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
-const JWT_SECRET = process.env.JWT_SECRET ?? 'borealismark-jwt-dev-secret-change-me';
+const JWT_SECRET = (() => {
+  const secret = process.env.JWT_SECRET;
+  if (!secret && process.env.NODE_ENV === 'production') {
+    logger.error('FATAL: JWT_SECRET must be set in production');
+    process.exit(1);
+  }
+  if (!secret || secret === 'borealismark-jwt-dev-secret-change-me') {
+    logger.warn('Using default JWT secret — set JWT_SECRET env var for production');
+  }
+  return secret ?? 'borealismark-jwt-dev-secret-change-me';
+})();
 const JWT_EXPIRES_IN = '24h';
 const JWT_REFRESH_WINDOW = 2 * 60 * 60 * 1000; // last 2 hours — eligible for refresh
 const BCRYPT_ROUNDS = 12;
@@ -92,7 +103,7 @@ export function requireAuth(req: Request, res: Response, next: Function): void {
 
 // ─── POST /register ──────────────────────────────────────────────────────────
 
-router.post('/register', async (req: Request, res: Response) => {
+router.post('/register', authLimiter, async (req: Request, res: Response) => {
   try {
     const parsed = registerSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -141,13 +152,13 @@ router.post('/register', async (req: Request, res: Response) => {
     });
   } catch (err: any) {
     logger.error('Registration error', { error: err.message, stack: err.stack });
-    res.status(500).json({ success: false, error: 'Registration failed', debug: err.message });
+    res.status(500).json({ success: false, error: 'Registration failed' });
   }
 });
 
 // ─── POST /login ─────────────────────────────────────────────────────────────
 
-router.post('/login', async (req: Request, res: Response) => {
+router.post('/login', authLimiter, async (req: Request, res: Response) => {
   try {
     const parsed = loginSchema.safeParse(req.body);
     if (!parsed.success) {

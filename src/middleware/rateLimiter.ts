@@ -25,6 +25,17 @@ export const globalLimiter = rateLimit({
   skip: (req) => req.path === '/health', // Health checks are exempt
 });
 
+// ─── Auth Limiter ────────────────────────────────────────────────────────────
+// Login and registration: 10 attempts per 15 minutes per IP prevents brute-force.
+
+export const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: rateLimitHandler,
+});
+
 // ─── Audit Limiter ────────────────────────────────────────────────────────────
 // Running an audit involves Hedera consensus submission — computationally and
 // financially non-trivial. 20 per minute per API key is a hard ceiling.
