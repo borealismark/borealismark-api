@@ -234,6 +234,81 @@ function initSchema(db: Database.Database): void {
       FOREIGN KEY (agent_id) REFERENCES agents(id)
     );
 
+    -- ── Marketplace Listings (user-posted buy/sell/trade) ───────────────────
+    CREATE TABLE IF NOT EXISTS marketplace_listings (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      agent_id TEXT,
+      title TEXT NOT NULL,
+      description TEXT NOT NULL,
+      listing_type TEXT NOT NULL DEFAULT 'sell',
+      category TEXT NOT NULL,
+      price_usdc REAL,
+      trade_for TEXT,
+      images TEXT NOT NULL DEFAULT '[]',
+      tags TEXT NOT NULL DEFAULT '[]',
+      status TEXT NOT NULL DEFAULT 'pending_audit',
+      audit_id TEXT,
+      assigned_agent_id TEXT,
+      view_count INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      published_at INTEGER,
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_listings_user ON marketplace_listings(user_id);
+    CREATE INDEX IF NOT EXISTS idx_listings_status ON marketplace_listings(status);
+    CREATE INDEX IF NOT EXISTS idx_listings_type ON marketplace_listings(listing_type);
+    CREATE INDEX IF NOT EXISTS idx_listings_category ON marketplace_listings(category);
+
+    -- ── Listing Audit Queue ──────────────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS listing_audits (
+      id TEXT PRIMARY KEY,
+      listing_id TEXT NOT NULL,
+      auditor_id TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      reason TEXT,
+      notes TEXT,
+      created_at INTEGER NOT NULL,
+      completed_at INTEGER,
+      FOREIGN KEY (listing_id) REFERENCES marketplace_listings(id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_listing_audits_status ON listing_audits(status);
+    CREATE INDEX IF NOT EXISTS idx_listing_audits_listing ON listing_audits(listing_id);
+
+    -- ── Message Threads (DM / negotiation) ───────────────────────────────────
+    CREATE TABLE IF NOT EXISTS message_threads (
+      id TEXT PRIMARY KEY,
+      listing_id TEXT,
+      contract_id TEXT,
+      participant_a TEXT NOT NULL,
+      participant_b TEXT NOT NULL,
+      subject TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'active',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_threads_participants ON message_threads(participant_a, participant_b);
+    CREATE INDEX IF NOT EXISTS idx_threads_listing ON message_threads(listing_id);
+    CREATE INDEX IF NOT EXISTS idx_threads_contract ON message_threads(contract_id);
+
+    -- ── Messages ─────────────────────────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS messages (
+      id TEXT PRIMARY KEY,
+      thread_id TEXT NOT NULL,
+      sender_id TEXT NOT NULL,
+      body TEXT NOT NULL,
+      read_at INTEGER,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (thread_id) REFERENCES message_threads(id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender_id);
+
     -- ── Indices ──────────────────────────────────────────────────────────────
     CREATE INDEX IF NOT EXISTS idx_certs_agent ON audit_certificates(agent_id);
     CREATE INDEX IF NOT EXISTS idx_certs_issued ON audit_certificates(issued_at DESC);

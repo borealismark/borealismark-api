@@ -74,6 +74,25 @@ function signToken(userId: string, email: string, tier: string, role: string = '
 }
 
 /**
+ * JWT payload shape decoded from the Bearer token.
+ */
+export interface JwtPayload {
+  sub: string;
+  email: string;
+  tier: string;
+  role: string;
+  iat: number;
+  exp: number;
+}
+
+/**
+ * Request with authenticated user attached.
+ */
+export interface AuthRequest extends Request {
+  user?: JwtPayload;
+}
+
+/**
  * Middleware: extract and verify JWT from Authorization header.
  * Attaches decoded payload to req.user.
  */
@@ -86,13 +105,7 @@ export function requireAuth(req: Request, res: Response, next: Function): void {
 
   const token = header.slice(7);
   try {
-    const decoded = jwt.verify(token, JWT_SECRET) as {
-      sub: string;
-      email: string;
-      tier: string;
-      iat: number;
-      exp: number;
-    };
+    const decoded = jwt.verify(token, JWT_SECRET) as JwtPayload;
     (req as any).user = decoded;
     next();
   } catch (err: any) {

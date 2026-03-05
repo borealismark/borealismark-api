@@ -14,6 +14,7 @@ import keysRouter from './routes/keys';
 import webhooksRouter from './routes/webhooks';
 import paymentsRouter from './routes/payments';
 import terminalRouter from './routes/terminal';
+import marketplaceRouter from './routes/marketplace';
 import { cleanupExpiredInvoices } from './hedera/usdc';
 
 const app = express();
@@ -82,6 +83,7 @@ app.use('/v1/keys',     keysRouter);
 app.use('/v1/webhooks', webhooksRouter);
 app.use('/v1/payments', paymentsRouter);
 app.use('/v1/terminal', terminalRouter);
+app.use('/v1/marketplace', marketplaceRouter);
 
 // ─── Static Files (Dashboard) ────────────────────────────────────────────────
 
