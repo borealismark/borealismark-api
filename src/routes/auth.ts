@@ -140,8 +140,8 @@ router.post('/register', async (req: Request, res: Response) => {
       },
     });
   } catch (err: any) {
-    logger.error('Registration error', { error: err.message });
-    res.status(500).json({ success: false, error: 'Registration failed' });
+    logger.error('Registration error', { error: err.message, stack: err.stack });
+    res.status(500).json({ success: false, error: 'Registration failed', debug: err.message });
   }
 });
 
