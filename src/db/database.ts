@@ -1178,6 +1178,7 @@ export function seedProhibitedItems(): void {
 
     // ── Stolen Data & Credentials ──
     ['data-theft', 'stolen credentials', 'block', 'Stolen credentials'],
+    ['data-theft', 'stolen credit card', 'block', 'Stolen credit cards'],
     ['data-theft', 'credit card dump', 'block', 'Credit card dumps'],
     ['data-theft', 'ssn database', 'block', 'SSN databases'],
     ['data-theft', 'hacked accounts', 'block', 'Hacked accounts'],

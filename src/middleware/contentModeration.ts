@@ -126,7 +126,8 @@ export function scanContent(
     const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     let regex: RegExp;
     try {
-      regex = new RegExp(`\\b${escaped}\\b`, 'i');
+      // Allow common suffixes (s, es, ed, ing, er, ers) so "explosive" also catches "explosives"
+      regex = new RegExp(`\\b${escaped}(?:s|es|ed|ing|er|ers)?\\b`, 'i');
     } catch {
       // Fallback to simple includes if regex fails
       regex = new RegExp(escaped, 'i');
