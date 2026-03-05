@@ -36,6 +36,17 @@ export const authLimiter = rateLimit({
   handler: rateLimitHandler,
 });
 
+// ─── Password Reset Limiter ──────────────────────────────────────────────────
+// 3 reset requests per 15 minutes per IP — prevents abuse/email flooding.
+
+export const passwordResetLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 3,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: rateLimitHandler,
+});
+
 // ─── Audit Limiter ────────────────────────────────────────────────────────────
 // Running an audit involves Hedera consensus submission — computationally and
 // financially non-trivial. 20 per minute per API key is a hard ceiling.

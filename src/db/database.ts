@@ -358,6 +358,23 @@ function initSchema(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_terminal_contracts_provider ON terminal_contracts(provider_agent_id);
     CREATE INDEX IF NOT EXISTS idx_terminal_contracts_requester ON terminal_contracts(requester_agent_id);
     CREATE INDEX IF NOT EXISTS idx_terminal_contracts_status ON terminal_contracts(status);
+
+    -- ── Password Reset Tokens ────────────────────────────────────────────────
+    -- Secure token-based password reset: token_hash stores SHA-256, never raw
+    CREATE TABLE IF NOT EXISTS password_reset_tokens (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      email TEXT NOT NULL,
+      token_hash TEXT NOT NULL UNIQUE,
+      expires_at INTEGER NOT NULL,
+      used_at INTEGER,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_prt_token ON password_reset_tokens(token_hash);
+    CREATE INDEX IF NOT EXISTS idx_prt_user ON password_reset_tokens(user_id);
+    CREATE INDEX IF NOT EXISTS idx_prt_expires ON password_reset_tokens(expires_at);
   `);
 
   // Migrate: add new columns to api_keys if upgrading from old schema
@@ -485,6 +502,92 @@ export function getUserByStripeCustomerId(customerId: string): UserRecord | null
     .get(customerId) as Record<string, unknown> | undefined;
   if (!row) return null;
   return rowToUser(row);
+}
+
+// ─── Password Reset Token Queries ────────────────────────────────────────────
+
+export interface PasswordResetTokenRecord {
+  id: string;
+  userId: string;
+  email: string;
+  tokenHash: string;
+  expiresAt: number;
+  usedAt: number | null;
+  createdAt: number;
+}
+
+/**
+ * Create a password reset token. Returns the raw token (sent in the email link).
+ * Only the SHA-256 hash is stored in the database.
+ */
+export function createPasswordResetToken(userId: string, email: string): string {
+  const rawToken = randomBytes(32).toString('hex');
+  const tokenHash = createHash('sha256').update(rawToken).digest('hex');
+  const id = uuidv4();
+  const now = Date.now();
+  const expiresAt = now + 60 * 60 * 1000; // 1 hour
+
+  // Invalidate any existing unused tokens for this user
+  getDb()
+    .prepare('UPDATE password_reset_tokens SET used_at = ? WHERE user_id = ? AND used_at IS NULL')
+    .run(now, userId);
+
+  getDb()
+    .prepare(
+      'INSERT INTO password_reset_tokens (id, user_id, email, token_hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+    )
+    .run(id, userId, email.toLowerCase().trim(), tokenHash, expiresAt, now);
+
+  return rawToken;
+}
+
+/**
+ * Look up a reset token by its raw value (hashes it to match the DB).
+ * Returns null if not found, already used, or expired.
+ */
+export function getValidPasswordResetToken(rawToken: string): PasswordResetTokenRecord | null {
+  const tokenHash = createHash('sha256').update(rawToken).digest('hex');
+  const row = getDb()
+    .prepare('SELECT * FROM password_reset_tokens WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?')
+    .get(tokenHash, Date.now()) as Record<string, unknown> | undefined;
+  if (!row) return null;
+  return {
+    id: row.id as string,
+    userId: row.user_id as string,
+    email: row.email as string,
+    tokenHash: row.token_hash as string,
+    expiresAt: row.expires_at as number,
+    usedAt: row.used_at as number | null,
+    createdAt: row.created_at as number,
+  };
+}
+
+/**
+ * Mark a token as used (one-time use).
+ */
+export function markPasswordResetTokenUsed(tokenId: string): void {
+  getDb()
+    .prepare('UPDATE password_reset_tokens SET used_at = ? WHERE id = ?')
+    .run(Date.now(), tokenId);
+}
+
+/**
+ * Update a user's password hash.
+ */
+export function updateUserPassword(userId: string, passwordHash: string): void {
+  getDb()
+    .prepare('UPDATE users SET password_hash = ? WHERE id = ?')
+    .run(passwordHash, userId);
+}
+
+/**
+ * Clean up expired tokens (housekeeping).
+ */
+export function deleteExpiredPasswordResetTokens(): number {
+  const result = getDb()
+    .prepare('DELETE FROM password_reset_tokens WHERE expires_at < ? OR used_at IS NOT NULL')
+    .run(Date.now() - 24 * 60 * 60 * 1000); // Keep used tokens for 24h audit trail
+  return result.changes;
 }
 
 // ─── USDC Invoice Queries ────────────────────────────────────────────────────

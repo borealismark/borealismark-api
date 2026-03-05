@@ -20,9 +20,14 @@ import {
   getUserById,
   updateUserLogin,
   updateUserRole,
+  createPasswordResetToken,
+  getValidPasswordResetToken,
+  markPasswordResetTokenUsed,
+  updateUserPassword,
 } from '../db/database';
 import { logger } from '../middleware/logger';
-import { authLimiter } from '../middleware/rateLimiter';
+import { authLimiter, passwordResetLimiter } from '../middleware/rateLimiter';
+import { sendPasswordResetEmail } from '../services/email';
 
 const router = Router();
 
@@ -61,6 +66,22 @@ const registerSchema = z.object({
 const loginSchema = z.object({
   email: z.string().email(),
   password: z.string().min(1),
+});
+
+const forgotPasswordSchema = z.object({
+  email: z.string().email('Invalid email address'),
+});
+
+const resetPasswordSchema = z.object({
+  token: z.string().min(1, 'Reset token is required'),
+  newPassword: z
+    .string()
+    .min(8, 'Password must be at least 8 characters')
+    .max(128, 'Password too long')
+    .regex(
+      /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/,
+      'Password must contain uppercase, lowercase, and a number',
+    ),
 });
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -271,6 +292,123 @@ router.post('/refresh', requireAuth, (req: Request, res: Response) => {
 
   const token = signToken(user.id, user.email, user.tier, user.role);
   res.json({ success: true, data: { token } });
+});
+
+// ─── POST /forgot-password ───────────────────────────────────────────────────
+// Initiate password reset — sends email with secure reset link.
+// Always returns success to prevent email enumeration.
+
+router.post('/forgot-password', passwordResetLimiter, async (req: Request, res: Response) => {
+  try {
+    const parsed = forgotPasswordSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({
+        success: false,
+        error: 'Please provide a valid email address',
+        details: parsed.error.flatten().fieldErrors,
+      });
+      return;
+    }
+
+    const { email } = parsed.data;
+    const user = getUserByEmail(email);
+
+    if (user) {
+      // Generate reset token and send email
+      const rawToken = createPasswordResetToken(user.id, user.email);
+      const sent = await sendPasswordResetEmail(user.email, rawToken, user.name);
+
+      if (!sent) {
+        logger.error('Failed to send password reset email', { userId: user.id, email });
+      } else {
+        logger.info('Password reset requested', { userId: user.id, email });
+      }
+    } else {
+      // Timing-safe: still spend time even if user not found
+      await new Promise((resolve) => setTimeout(resolve, 100 + Math.random() * 200));
+      logger.info('Password reset attempted for unknown email', { email });
+    }
+
+    // Always return success to prevent email enumeration
+    res.json({
+      success: true,
+      data: {
+        message: 'If an account with that email exists, a password reset link has been sent.',
+      },
+    });
+  } catch (err: any) {
+    logger.error('Forgot password error', { error: err.message });
+    res.status(500).json({ success: false, error: 'Password reset request failed' });
+  }
+});
+
+// ─── POST /reset-password ───────────────────────────────────────────────────
+// Complete password reset — validates token and sets new password.
+
+router.post('/reset-password', passwordResetLimiter, async (req: Request, res: Response) => {
+  try {
+    const parsed = resetPasswordSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({
+        success: false,
+        error: 'Validation failed',
+        details: parsed.error.flatten().fieldErrors,
+      });
+      return;
+    }
+
+    const { token, newPassword } = parsed.data;
+
+    // Look up the token
+    const resetRecord = getValidPasswordResetToken(token);
+    if (!resetRecord) {
+      res.status(400).json({
+        success: false,
+        error: 'Invalid or expired reset link. Please request a new one.',
+      });
+      return;
+    }
+
+    // Verify user still exists and is active
+    const user = getUserById(resetRecord.userId);
+    if (!user) {
+      res.status(400).json({
+        success: false,
+        error: 'Account not found',
+      });
+      return;
+    }
+
+    // Hash new password and update
+    const passwordHash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
+    updateUserPassword(user.id, passwordHash);
+
+    // Mark token as used (one-time)
+    markPasswordResetTokenUsed(resetRecord.id);
+
+    logger.info('Password reset completed', { userId: user.id, email: user.email });
+
+    // Issue a fresh JWT so the user is immediately logged in
+    const jwtToken = signToken(user.id, user.email, user.tier, user.role);
+
+    res.json({
+      success: true,
+      data: {
+        message: 'Password has been reset successfully',
+        token: jwtToken,
+        user: {
+          id: user.id,
+          email: user.email,
+          name: user.name,
+          tier: user.tier,
+          role: user.role,
+        },
+      },
+    });
+  } catch (err: any) {
+    logger.error('Reset password error', { error: err.message });
+    res.status(500).json({ success: false, error: 'Password reset failed' });
+  }
 });
 
 // ─── POST /admin/create ─────────────────────────────────────────────────────
