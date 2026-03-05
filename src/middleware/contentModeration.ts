@@ -20,7 +20,7 @@
  * keyword ALWAYS goes through mandatory human audit. Nobody is above the rules.
  */
 
-import { getActiveProhibitedItems, logModeration, getUserActiveListingCount } from '../db/database';
+import { getDb, getActiveProhibitedItems, logModeration, getUserActiveListingCount } from '../db/database';
 import { v4 as uuid } from 'uuid';
 import { logger } from './logger';
 
@@ -320,8 +320,6 @@ export function getModerationStats(): {
   totalFlags: number;
   recentActions: any[];
 } {
-  // Import getDb dynamically to avoid circular dependency
-  const { getDb } = require('../db/database') as { getDb: () => any };
   const db = getDb();
 
   const totalProhibitedItems = (
