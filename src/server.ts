@@ -2,7 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import path from 'path';
-import { getDb } from './db/database';
+import { getDb, seedProhibitedItems } from './db/database';
 import { requestLogger, logger } from './middleware/logger';
 import { globalLimiter } from './middleware/rateLimiter';
 import authRouter from './routes/auth';
@@ -134,6 +134,9 @@ app.use((err: Error, req: express.Request, res: express.Response, _next: express
 
 // Initialise DB (creates schema + seeds master key)
 getDb();
+
+// Seed prohibited items database (idempotent — only runs on fresh DB)
+seedProhibitedItems();
 
 // Clean up expired USDC invoices every 5 minutes
 setInterval(() => {

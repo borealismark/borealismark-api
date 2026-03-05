@@ -309,6 +309,41 @@ function initSchema(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender_id);
 
+    -- ── Prohibited Items & Content Moderation ────────────────────────────────
+    CREATE TABLE IF NOT EXISTS prohibited_items (
+      id TEXT PRIMARY KEY,
+      category TEXT NOT NULL,
+      keyword TEXT NOT NULL COLLATE NOCASE,
+      severity TEXT NOT NULL DEFAULT 'block',       -- block | flag | warn
+      description TEXT,
+      active INTEGER NOT NULL DEFAULT 1,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_prohibited_keyword ON prohibited_items(keyword);
+    CREATE INDEX IF NOT EXISTS idx_prohibited_category ON prohibited_items(category);
+    CREATE INDEX IF NOT EXISTS idx_prohibited_active ON prohibited_items(active);
+
+    CREATE TABLE IF NOT EXISTS moderation_logs (
+      id TEXT PRIMARY KEY,
+      listing_id TEXT,
+      user_id TEXT,
+      action TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      matched_keywords TEXT,                        -- JSON array of matched keywords
+      severity TEXT NOT NULL,
+      automated INTEGER NOT NULL DEFAULT 1,
+      reviewer_id TEXT,
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_moderation_listing ON moderation_logs(listing_id);
+    CREATE INDEX IF NOT EXISTS idx_moderation_user ON moderation_logs(user_id);
+
+    -- ── User Listing Limits Tracking ───────────────────────────────────────────
+    -- (Tracked via marketplace_listings count per user, no extra table needed)
+
     -- ── Indices ──────────────────────────────────────────────────────────────
     CREATE INDEX IF NOT EXISTS idx_certs_agent ON audit_certificates(agent_id);
     CREATE INDEX IF NOT EXISTS idx_certs_issued ON audit_certificates(issued_at DESC);
@@ -971,4 +1006,218 @@ export function getGlobalStats(): {
   }
 
   return { totalMarks, totalAgents, avgScore, ratingDistribution };
+}
+
+// ─── Prohibited Items / Content Moderation ─────────────────────────────────
+
+export interface ProhibitedItem {
+  id: string;
+  category: string;
+  keyword: string;
+  severity: 'block' | 'flag' | 'warn';
+  description: string | null;
+  active: boolean;
+  createdAt: number;
+}
+
+export function addProhibitedItem(
+  id: string,
+  category: string,
+  keyword: string,
+  severity: 'block' | 'flag' | 'warn',
+  description?: string,
+): void {
+  const now = Date.now();
+  getDb()
+    .prepare(
+      'INSERT OR IGNORE INTO prohibited_items (id, category, keyword, severity, description, active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?)',
+    )
+    .run(id, category, keyword.toLowerCase().trim(), severity, description ?? null, now, now);
+}
+
+export function getActiveProhibitedItems(): ProhibitedItem[] {
+  const rows = getDb()
+    .prepare('SELECT * FROM prohibited_items WHERE active = 1')
+    .all() as any[];
+  return rows.map(r => ({
+    id: r.id,
+    category: r.category,
+    keyword: r.keyword,
+    severity: r.severity,
+    description: r.description,
+    active: r.active === 1,
+    createdAt: r.created_at,
+  }));
+}
+
+export function removeProhibitedItem(id: string): boolean {
+  const result = getDb()
+    .prepare('UPDATE prohibited_items SET active = 0, updated_at = ? WHERE id = ?')
+    .run(Date.now(), id);
+  return result.changes > 0;
+}
+
+export function logModeration(
+  id: string,
+  listingId: string | null,
+  userId: string | null,
+  action: string,
+  reason: string,
+  matchedKeywords: string[],
+  severity: string,
+  automated: boolean,
+  reviewerId?: string,
+): void {
+  getDb()
+    .prepare(
+      `INSERT INTO moderation_logs (id, listing_id, user_id, action, reason, matched_keywords, severity, automated, reviewer_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(id, listingId, userId, action, reason, JSON.stringify(matchedKeywords), severity, automated ? 1 : 0, reviewerId ?? null, Date.now());
+}
+
+export function getUserActiveListingCount(userId: string): number {
+  const row = getDb()
+    .prepare("SELECT COUNT(*) as c FROM marketplace_listings WHERE user_id = ? AND status NOT IN ('rejected', 'removed')")
+    .get(userId) as { c: number };
+  return row.c;
+}
+
+/**
+ * Seeds the prohibited items database with initial keywords.
+ * Idempotent — uses INSERT OR IGNORE to prevent duplicates.
+ */
+export function seedProhibitedItems(): void {
+  const db = getDb();
+  const count = (db.prepare('SELECT COUNT(*) as c FROM prohibited_items').get() as { c: number }).c;
+  if (count > 0) return; // Already seeded
+
+  const now = Date.now();
+  let seq = 0;
+  const insert = db.prepare(
+    'INSERT OR IGNORE INTO prohibited_items (id, category, keyword, severity, description, active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?)'
+  );
+
+  const items: Array<[string, string, 'block' | 'flag' | 'warn', string]> = [
+    // ── Weapons & Ammunition ──
+    ['weapons', 'firearm', 'block', 'Firearms and guns'],
+    ['weapons', 'handgun', 'block', 'Handguns'],
+    ['weapons', 'rifle', 'flag', 'Rifles — context dependent'],
+    ['weapons', 'shotgun', 'block', 'Shotguns'],
+    ['weapons', 'assault weapon', 'block', 'Assault weapons'],
+    ['weapons', 'machine gun', 'block', 'Machine guns'],
+    ['weapons', 'ammunition', 'block', 'Ammunition'],
+    ['weapons', 'ammo', 'block', 'Ammo shorthand'],
+    ['weapons', 'silencer', 'block', 'Firearm silencers'],
+    ['weapons', 'suppressor', 'block', 'Firearm suppressors'],
+    ['weapons', 'explosive', 'block', 'Explosives'],
+    ['weapons', 'grenade', 'block', 'Grenades'],
+    ['weapons', 'bomb', 'block', 'Bombs'],
+    ['weapons', 'detonator', 'block', 'Detonators'],
+    ['weapons', 'switchblade', 'block', 'Switchblades'],
+    ['weapons', 'brass knuckles', 'block', 'Brass knuckles'],
+    ['weapons', 'nunchaku', 'flag', 'Nunchaku'],
+    ['weapons', 'throwing star', 'block', 'Throwing stars'],
+
+    // ── Drugs & Controlled Substances ──
+    ['drugs', 'cocaine', 'block', 'Cocaine'],
+    ['drugs', 'heroin', 'block', 'Heroin'],
+    ['drugs', 'methamphetamine', 'block', 'Methamphetamine'],
+    ['drugs', 'meth', 'block', 'Meth shorthand'],
+    ['drugs', 'fentanyl', 'block', 'Fentanyl'],
+    ['drugs', 'lsd', 'block', 'LSD'],
+    ['drugs', 'ecstasy', 'block', 'Ecstasy/MDMA'],
+    ['drugs', 'mdma', 'block', 'MDMA'],
+    ['drugs', 'opioid', 'flag', 'Opioids — context dependent'],
+    ['drugs', 'drug paraphernalia', 'block', 'Drug paraphernalia'],
+    ['drugs', 'crack pipe', 'block', 'Crack pipes'],
+    ['drugs', 'bong', 'flag', 'Bongs — could be legal paraphernalia'],
+    ['drugs', 'synthetic cannabinoid', 'block', 'Synthetic cannabinoids'],
+    ['drugs', 'bath salts drug', 'block', 'Bath salts (drug)'],
+    ['drugs', 'psilocybin', 'flag', 'Psilocybin — legal in some jurisdictions'],
+    ['drugs', 'ketamine', 'flag', 'Ketamine — medical vs recreational'],
+
+    // ── Counterfeit & Stolen Goods ──
+    ['counterfeit', 'counterfeit', 'block', 'Counterfeit goods'],
+    ['counterfeit', 'replica designer', 'block', 'Replica designer goods'],
+    ['counterfeit', 'fake id', 'block', 'Fake identification documents'],
+    ['counterfeit', 'forged document', 'block', 'Forged documents'],
+    ['counterfeit', 'stolen property', 'block', 'Stolen property'],
+    ['counterfeit', 'knockoff', 'flag', 'Knockoff goods — context dependent'],
+    ['counterfeit', 'bootleg', 'flag', 'Bootleg goods'],
+
+    // ── Exploitation & Trafficking ──
+    ['exploitation', 'human trafficking', 'block', 'Human trafficking'],
+    ['exploitation', 'child exploitation', 'block', 'Child exploitation — zero tolerance'],
+    ['exploitation', 'child pornography', 'block', 'CSAM — zero tolerance'],
+    ['exploitation', 'csam', 'block', 'CSAM shorthand — zero tolerance'],
+    ['exploitation', 'sex trafficking', 'block', 'Sex trafficking'],
+    ['exploitation', 'forced labor', 'block', 'Forced labor'],
+    ['exploitation', 'escort service', 'block', 'Escort services'],
+    ['exploitation', 'prostitution', 'block', 'Prostitution'],
+    ['exploitation', 'underage', 'flag', 'Underage — context dependent'],
+    ['exploitation', 'minor for sale', 'block', 'Minors for sale — zero tolerance'],
+
+    // ── Hazardous Materials ──
+    ['hazmat', 'radioactive', 'block', 'Radioactive materials'],
+    ['hazmat', 'toxic waste', 'block', 'Toxic waste'],
+    ['hazmat', 'biohazard', 'block', 'Biohazard materials'],
+    ['hazmat', 'chemical weapon', 'block', 'Chemical weapons'],
+    ['hazmat', 'poison', 'flag', 'Poison — context dependent (pest control vs intent)'],
+    ['hazmat', 'cyanide', 'block', 'Cyanide'],
+    ['hazmat', 'ricin', 'block', 'Ricin'],
+    ['hazmat', 'anthrax', 'block', 'Anthrax'],
+
+    // ── Endangered Species & Wildlife ──
+    ['wildlife', 'ivory', 'block', 'Ivory products'],
+    ['wildlife', 'rhino horn', 'block', 'Rhino horn'],
+    ['wildlife', 'tiger parts', 'block', 'Tiger parts'],
+    ['wildlife', 'endangered species', 'block', 'Endangered species products'],
+    ['wildlife', 'exotic animal', 'flag', 'Exotic animals — context dependent'],
+    ['wildlife', 'bushmeat', 'block', 'Bushmeat'],
+
+    // ── Stolen Data & Credentials ──
+    ['data-theft', 'stolen credentials', 'block', 'Stolen credentials'],
+    ['data-theft', 'credit card dump', 'block', 'Credit card dumps'],
+    ['data-theft', 'ssn database', 'block', 'SSN databases'],
+    ['data-theft', 'hacked accounts', 'block', 'Hacked accounts'],
+    ['data-theft', 'data breach', 'flag', 'Data breach data — context dependent'],
+    ['data-theft', 'login credentials for sale', 'block', 'Login credentials for sale'],
+    ['data-theft', 'fullz', 'block', 'Fullz (stolen identity packages)'],
+    ['data-theft', 'dox', 'block', 'Doxxing services'],
+    ['data-theft', 'ddos service', 'block', 'DDoS attack services'],
+    ['data-theft', 'ransomware', 'block', 'Ransomware'],
+    ['data-theft', 'malware', 'block', 'Malware'],
+    ['data-theft', 'exploit kit', 'block', 'Exploit kits'],
+    ['data-theft', 'zero day', 'flag', 'Zero-day exploits — context dependent'],
+
+    // ── Financial Fraud ──
+    ['fraud', 'money laundering', 'block', 'Money laundering services'],
+    ['fraud', 'pyramid scheme', 'block', 'Pyramid schemes'],
+    ['fraud', 'ponzi scheme', 'block', 'Ponzi schemes'],
+    ['fraud', 'unregistered security', 'block', 'Unregistered securities'],
+    ['fraud', 'pump and dump', 'block', 'Pump and dump schemes'],
+    ['fraud', 'insider trading', 'block', 'Insider trading tips'],
+
+    // ── Regulated Items (flag for review, not auto-block) ──
+    ['regulated', 'prescription medication', 'flag', 'Prescription meds — require license'],
+    ['regulated', 'tobacco', 'flag', 'Tobacco products — age restricted'],
+    ['regulated', 'alcohol', 'flag', 'Alcohol — age and license restricted'],
+    ['regulated', 'vape', 'flag', 'Vape products — age restricted'],
+    ['regulated', 'gambling', 'flag', 'Gambling services — regulated'],
+    ['regulated', 'cbd oil', 'flag', 'CBD oil — legality varies'],
+    ['regulated', 'cannabis', 'flag', 'Cannabis — legality varies by jurisdiction'],
+    ['regulated', 'marijuana', 'flag', 'Marijuana — legality varies by jurisdiction'],
+  ];
+
+  const insertMany = db.transaction(() => {
+    for (const [category, keyword, severity, description] of items) {
+      seq++;
+      const id = `seed-${seq.toString().padStart(4, '0')}`;
+      insert.run(id, category, keyword, severity, description, now, now);
+    }
+  });
+
+  insertMany();
+  logger.info(`Seeded ${items.length} prohibited items into moderation database`);
 }

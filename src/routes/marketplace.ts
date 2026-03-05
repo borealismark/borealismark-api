@@ -47,6 +47,13 @@ import {
   USDC_TOKEN_ID,
   TREASURY_ACCOUNT_ID,
 } from '../hedera/usdc';
+import {
+  moderateListing,
+  getTierPrivileges,
+  scanContent,
+  getModerationStats,
+} from '../middleware/contentModeration';
+import { getUserById, getUserActiveListingCount } from '../db/database';
 
 const router = Router();
 
@@ -98,7 +105,12 @@ const RatingSchema = z.object({
 
 /**
  * POST /v1/marketplace/listings — Create a new listing
- * Listing enters audit queue before publishing.
+ * Listing is scanned through content moderation and tier privileges.
+ *   - Blocked content → rejected immediately
+ *   - Flagged content → always goes to human audit regardless of tier
+ *   - Clean content + Platinum/Sovereign → auto-published
+ *   - Clean content + Pro/Elite → auto-published (light audit pass)
+ *   - Clean content + Standard → enters audit queue
  */
 router.post('/listings', requireAuth, async (req: Request, res: Response) => {
   try {
@@ -133,45 +145,112 @@ router.post('/listings', requireAuth, async (req: Request, res: Response) => {
       });
     }
 
+    // ─── Content Moderation + Tier Privileges ─────────────────────────
+    const userTier = authReq.user?.tier ?? 'standard';
+    const moderation = moderateListing(userId, userTier, title, description, tags);
+
+    // Blocked by content moderation (prohibited items or listing limit)
+    if (moderation.status === 'blocked') {
+      return res.status(403).json({
+        success: false,
+        error: moderation.reason,
+        moderation: {
+          verdict: moderation.scanResult.verdict,
+          matchedKeywords: moderation.scanResult.matchedKeywords.map(m => ({
+            keyword: m.keyword,
+            category: m.category,
+            foundIn: m.foundIn,
+          })),
+          listingLimitReached: moderation.listingLimitReached,
+          tierPrivileges: {
+            tier: userTier,
+            maxListings: moderation.tierPrivileges.maxActiveListings,
+          },
+        },
+      });
+    }
+
     const listingId = uuid();
-    const auditId = uuid();
     const now = Date.now();
 
-    // Create listing in pending_audit state
-    getDb().prepare(`
-      INSERT INTO marketplace_listings
-        (id, user_id, agent_id, title, description, listing_type, category,
-         price_usdc, trade_for, tags, status, audit_id, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_audit', ?, ?, ?)
-    `).run(
-      listingId, userId, agentId ?? null, title, description, listingType, category,
-      priceUsdc ?? null, tradeFor ?? null, JSON.stringify(tags),
-      auditId, now, now,
-    );
+    if (moderation.status === 'auto_published') {
+      // ─── Auto-publish (clean content + elevated tier) ─────────────
+      getDb().prepare(`
+        INSERT INTO marketplace_listings
+          (id, user_id, agent_id, title, description, listing_type, category,
+           price_usdc, trade_for, tags, status, created_at, updated_at, published_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'published', ?, ?, ?)
+      `).run(
+        listingId, userId, agentId ?? null, title, description, listingType, category,
+        priceUsdc ?? null, tradeFor ?? null, JSON.stringify(tags),
+        now, now, now,
+      );
 
-    // Create audit record
-    getDb().prepare(`
-      INSERT INTO listing_audits (id, listing_id, status, created_at)
-      VALUES (?, ?, 'pending', ?)
-    `).run(auditId, listingId, now);
+      logger.info('Marketplace listing auto-published', {
+        listingId, userId, userTier, listingType, category,
+        reason: moderation.reason,
+      });
 
-    logger.info('Marketplace listing created (pending audit)', {
-      listingId, userId, listingType, category,
-    });
+      const badge = moderation.tierPrivileges.badge;
 
-    res.status(201).json({
-      success: true,
-      data: {
-        id: listingId,
-        title,
-        listingType,
-        category,
-        status: 'pending_audit',
-        auditId,
-        message: 'Your listing has been submitted for review. It will be published once approved.',
-        createdAt: now,
-      },
-    });
+      res.status(201).json({
+        success: true,
+        data: {
+          id: listingId,
+          title,
+          listingType,
+          category,
+          status: 'published',
+          badge,
+          message: moderation.reason,
+          createdAt: now,
+          publishedAt: now,
+        },
+      });
+    } else {
+      // ─── Pending audit (flagged content or standard tier) ─────────
+      const auditId = uuid();
+
+      getDb().prepare(`
+        INSERT INTO marketplace_listings
+          (id, user_id, agent_id, title, description, listing_type, category,
+           price_usdc, trade_for, tags, status, audit_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_audit', ?, ?, ?)
+      `).run(
+        listingId, userId, agentId ?? null, title, description, listingType, category,
+        priceUsdc ?? null, tradeFor ?? null, JSON.stringify(tags),
+        auditId, now, now,
+      );
+
+      // Create audit record with moderation notes
+      const auditNotes = moderation.scanResult.matchedKeywords.length > 0
+        ? `Auto-flagged keywords: ${moderation.scanResult.matchedKeywords.map(m => `${m.keyword} (${m.severity}/${m.foundIn})`).join(', ')}`
+        : null;
+
+      getDb().prepare(`
+        INSERT INTO listing_audits (id, listing_id, status, notes, created_at)
+        VALUES (?, ?, 'pending', ?, ?)
+      `).run(auditId, listingId, auditNotes, now);
+
+      logger.info('Marketplace listing created (pending audit)', {
+        listingId, userId, userTier, listingType, category,
+        flaggedKeywords: moderation.scanResult.matchedKeywords.map(m => m.keyword),
+      });
+
+      res.status(201).json({
+        success: true,
+        data: {
+          id: listingId,
+          title,
+          listingType,
+          category,
+          status: 'pending_audit',
+          auditId,
+          message: moderation.reason,
+          createdAt: now,
+        },
+      });
+    }
   } catch (err: any) {
     logger.error('Listing creation error', { error: err.message });
     res.status(500).json({ success: false, error: 'Failed to create listing' });
@@ -368,15 +447,63 @@ router.patch('/listings/:id', requireAuth, async (req: Request, res: Response) =
     const updates = parsed.data;
     const now = Date.now();
 
-    // If listing was published and is being edited, send it back through audit
-    const newStatus = listing.status === 'published' ? 'pending_audit' : listing.status;
+    // ─── Scan updated content through moderation ──────────────────────
+    const newTitle = updates.title ?? listing.title;
+    const newDesc = updates.description ?? listing.description;
+    const newTags = updates.tags ?? JSON.parse(listing.tags || '[]');
+
+    const scanResult = scanContent(newTitle, newDesc, newTags);
+
+    // Block prohibited content even on edits
+    if (scanResult.verdict === 'block') {
+      return res.status(403).json({
+        success: false,
+        error: 'Updated content contains prohibited items and cannot be saved.',
+        moderation: {
+          verdict: 'block',
+          matchedKeywords: scanResult.matchedKeywords.map(m => ({
+            keyword: m.keyword,
+            category: m.category,
+            foundIn: m.foundIn,
+          })),
+        },
+      });
+    }
+
+    // Determine new status based on tier and scan result
+    const authReq2 = req as AuthRequest;
+    const userTier = authReq2.user?.tier ?? 'standard';
+    const privileges = getTierPrivileges(userTier);
+
+    let newStatus: string;
     let newAuditId = listing.audit_id;
 
-    if (listing.status === 'published' || listing.status === 'rejected') {
-      // Create new audit record
+    if (scanResult.verdict === 'flag') {
+      // Flagged → always audit
+      newStatus = 'pending_audit';
+      newAuditId = uuid();
+      const auditNotes = `Edit re-scan flagged: ${scanResult.matchedKeywords.map(m => `${m.keyword} (${m.severity})`).join(', ')}`;
+      getDb().prepare(`INSERT INTO listing_audits (id, listing_id, status, notes, created_at) VALUES (?, ?, 'pending', ?, ?)`)
+        .run(newAuditId, req.params.id, auditNotes, now);
+    } else if (listing.status === 'published' && privileges.auditType === 'none') {
+      // Platinum/Sovereign editing a published listing: stays published
+      newStatus = 'published';
+    } else if (listing.status === 'published' && privileges.auditType === 'light') {
+      // Pro/Elite editing a published listing: stays published if clean
+      newStatus = 'published';
+    } else if (listing.status === 'published') {
+      // Standard editing a published listing: back to audit
+      newStatus = 'pending_audit';
       newAuditId = uuid();
       getDb().prepare(`INSERT INTO listing_audits (id, listing_id, status, created_at) VALUES (?, ?, 'pending', ?)`)
         .run(newAuditId, req.params.id, now);
+    } else if (listing.status === 'rejected') {
+      newStatus = 'pending_audit';
+      newAuditId = uuid();
+      getDb().prepare(`INSERT INTO listing_audits (id, listing_id, status, created_at) VALUES (?, ?, 'pending', ?)`)
+        .run(newAuditId, req.params.id, now);
+    } else {
+      newStatus = listing.status;
     }
 
     getDb().prepare(`
@@ -404,7 +531,7 @@ router.patch('/listings/:id', requireAuth, async (req: Request, res: Response) =
         status: newStatus,
         message: newStatus === 'pending_audit'
           ? 'Listing updated and resubmitted for review'
-          : 'Listing updated',
+          : 'Listing updated successfully',
         updatedAt: now,
       },
     });
@@ -1199,6 +1326,163 @@ router.post('/contracts/:id/dispute', requireAuth, async (req: Request, res: Res
     logger.error('Dispute error', { error: err.message });
     res.status(500).json({ success: false, error: 'Failed to raise dispute' });
   }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ─── CONTENT MODERATION (Admin) ─────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * GET /v1/marketplace/moderation/stats — Admin: get moderation overview
+ */
+router.get('/moderation/stats', requireAuth, async (req: Request, res: Response) => {
+  try {
+    const authReq = req as AuthRequest;
+    if (authReq.user?.role !== 'admin') {
+      return res.status(403).json({ success: false, error: 'Admin access required' });
+    }
+
+    const stats = getModerationStats();
+    res.json({ success: true, data: stats });
+  } catch (err: any) {
+    logger.error('Moderation stats error', { error: err.message });
+    res.status(500).json({ success: false, error: 'Failed to fetch moderation stats' });
+  }
+});
+
+/**
+ * GET /v1/marketplace/moderation/prohibited — Admin: list all prohibited items
+ */
+router.get('/moderation/prohibited', requireAuth, async (req: Request, res: Response) => {
+  try {
+    const authReq = req as AuthRequest;
+    if (authReq.user?.role !== 'admin') {
+      return res.status(403).json({ success: false, error: 'Admin access required' });
+    }
+
+    const { getActiveProhibitedItems } = require('../db/database');
+    const items = getActiveProhibitedItems();
+
+    // Group by category
+    const byCategory: Record<string, any[]> = {};
+    for (const item of items) {
+      if (!byCategory[item.category]) byCategory[item.category] = [];
+      byCategory[item.category].push(item);
+    }
+
+    res.json({
+      success: true,
+      data: {
+        totalItems: items.length,
+        categories: Object.keys(byCategory),
+        byCategory,
+      },
+    });
+  } catch (err: any) {
+    logger.error('Prohibited items list error', { error: err.message });
+    res.status(500).json({ success: false, error: 'Failed to fetch prohibited items' });
+  }
+});
+
+/**
+ * POST /v1/marketplace/moderation/prohibited — Admin: add a new prohibited item
+ */
+router.post('/moderation/prohibited', requireAuth, async (req: Request, res: Response) => {
+  try {
+    const authReq = req as AuthRequest;
+    if (authReq.user?.role !== 'admin') {
+      return res.status(403).json({ success: false, error: 'Admin access required' });
+    }
+
+    const { category, keyword, severity, description } = req.body;
+
+    if (!category || !keyword || !severity) {
+      return res.status(400).json({
+        success: false,
+        error: 'category, keyword, and severity (block|flag|warn) are required',
+      });
+    }
+
+    if (!['block', 'flag', 'warn'].includes(severity)) {
+      return res.status(400).json({ success: false, error: 'severity must be block, flag, or warn' });
+    }
+
+    const { addProhibitedItem } = require('../db/database');
+    const id = uuid();
+    addProhibitedItem(id, category, keyword, severity, description);
+
+    logger.info('Prohibited item added', { id, category, keyword, severity });
+
+    res.status(201).json({
+      success: true,
+      data: { id, category, keyword, severity, description: description ?? null },
+    });
+  } catch (err: any) {
+    logger.error('Add prohibited item error', { error: err.message });
+    res.status(500).json({ success: false, error: 'Failed to add prohibited item' });
+  }
+});
+
+/**
+ * DELETE /v1/marketplace/moderation/prohibited/:id — Admin: deactivate a prohibited item
+ */
+router.delete('/moderation/prohibited/:id', requireAuth, async (req: Request, res: Response) => {
+  try {
+    const authReq = req as AuthRequest;
+    if (authReq.user?.role !== 'admin') {
+      return res.status(403).json({ success: false, error: 'Admin access required' });
+    }
+
+    const { removeProhibitedItem } = require('../db/database');
+    const removed = removeProhibitedItem(req.params.id);
+
+    if (!removed) {
+      return res.status(404).json({ success: false, error: 'Prohibited item not found' });
+    }
+
+    logger.info('Prohibited item deactivated', { id: req.params.id });
+    res.json({ success: true, data: { id: req.params.id, message: 'Item deactivated' } });
+  } catch (err: any) {
+    logger.error('Remove prohibited item error', { error: err.message });
+    res.status(500).json({ success: false, error: 'Failed to remove prohibited item' });
+  }
+});
+
+/**
+ * POST /v1/marketplace/moderation/scan — Admin: test scan text against prohibited database
+ */
+router.post('/moderation/scan', requireAuth, async (req: Request, res: Response) => {
+  try {
+    const authReq = req as AuthRequest;
+    if (authReq.user?.role !== 'admin') {
+      return res.status(403).json({ success: false, error: 'Admin access required' });
+    }
+
+    const { title, description, tags } = req.body;
+    if (!title && !description) {
+      return res.status(400).json({ success: false, error: 'Provide title and/or description to scan' });
+    }
+
+    const result = scanContent(title ?? '', description ?? '', tags ?? []);
+
+    res.json({ success: true, data: result });
+  } catch (err: any) {
+    logger.error('Moderation scan error', { error: err.message });
+    res.status(500).json({ success: false, error: 'Scan failed' });
+  }
+});
+
+/**
+ * GET /v1/marketplace/tier-info — Get tier privileges information (public)
+ */
+router.get('/tier-info', async (_req: Request, res: Response) => {
+  const tiers = ['standard', 'pro', 'elite', 'platinum', 'sovereign'];
+  const info = tiers.map(tier => ({
+    tier,
+    ...getTierPrivileges(tier),
+  }));
+
+  res.json({ success: true, data: { tiers: info } });
 });
 
 export default router;
