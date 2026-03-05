@@ -143,6 +143,41 @@ function initSchema(db: Database.Database): void {
       FOREIGN KEY (webhook_id) REFERENCES webhooks(id)
     );
 
+    -- ── Terminal Marketplace ────────────────────────────────────────────────
+    -- Service listings: agents publish services other agents can hire
+    CREATE TABLE IF NOT EXISTS terminal_services (
+      id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      title TEXT NOT NULL,
+      description TEXT,
+      category TEXT NOT NULL,
+      price_usdc REAL NOT NULL,
+      min_trust_score INTEGER NOT NULL DEFAULT 0,
+      capabilities TEXT NOT NULL DEFAULT '[]',
+      max_concurrent_jobs INTEGER NOT NULL DEFAULT 5,
+      status TEXT NOT NULL DEFAULT 'active',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (agent_id) REFERENCES agents(id)
+    );
+
+    -- Contracts: when one agent hires another through the marketplace
+    CREATE TABLE IF NOT EXISTS terminal_contracts (
+      id TEXT PRIMARY KEY,
+      service_id TEXT NOT NULL,
+      provider_agent_id TEXT NOT NULL,
+      requester_agent_id TEXT NOT NULL,
+      job_description TEXT,
+      agreed_price REAL NOT NULL,
+      network_fee REAL NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (service_id) REFERENCES terminal_services(id),
+      FOREIGN KEY (provider_agent_id) REFERENCES agents(id),
+      FOREIGN KEY (requester_agent_id) REFERENCES agents(id)
+    );
+
     -- ── Indices ──────────────────────────────────────────────────────────────
     CREATE INDEX IF NOT EXISTS idx_certs_agent ON audit_certificates(agent_id);
     CREATE INDEX IF NOT EXISTS idx_certs_issued ON audit_certificates(issued_at DESC);
@@ -150,6 +185,13 @@ function initSchema(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_webhooks_owner ON webhooks(owner_key_id);
     CREATE INDEX IF NOT EXISTS idx_deliveries_webhook ON webhook_deliveries(webhook_id);
     CREATE INDEX IF NOT EXISTS idx_deliveries_event ON webhook_deliveries(event_type);
+    CREATE INDEX IF NOT EXISTS idx_terminal_services_category ON terminal_services(category);
+    CREATE INDEX IF NOT EXISTS idx_terminal_services_agent ON terminal_services(agent_id);
+    CREATE INDEX IF NOT EXISTS idx_terminal_services_status ON terminal_services(status);
+    CREATE INDEX IF NOT EXISTS idx_terminal_contracts_service ON terminal_contracts(service_id);
+    CREATE INDEX IF NOT EXISTS idx_terminal_contracts_provider ON terminal_contracts(provider_agent_id);
+    CREATE INDEX IF NOT EXISTS idx_terminal_contracts_requester ON terminal_contracts(requester_agent_id);
+    CREATE INDEX IF NOT EXISTS idx_terminal_contracts_status ON terminal_contracts(status);
   `);
 
   // Migrate: add new columns to api_keys if upgrading from old schema

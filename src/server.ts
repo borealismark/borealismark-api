@@ -13,6 +13,7 @@ import marksRouter from './routes/marks';
 import keysRouter from './routes/keys';
 import webhooksRouter from './routes/webhooks';
 import paymentsRouter from './routes/payments';
+import terminalRouter from './routes/terminal';
 
 const app = express();
 const PORT = parseInt(process.env.PORT ?? '3001', 10);
@@ -45,7 +46,7 @@ app.use((_req, res, next) => {
 
 app.use(cors({
   origin: process.env.NODE_ENV === 'production'
-    ? ['https://borealismark.com', 'https://www.borealismark.com']
+    ? ['https://borealismark.com', 'https://www.borealismark.com', 'https://borealisterminal.com', 'https://www.borealisterminal.com', 'https://borealisprotocol.ai', 'https://www.borealisprotocol.ai']
     : '*',
   exposedHeaders: ['X-Request-Id', 'RateLimit-Limit', 'RateLimit-Remaining', 'RateLimit-Reset'],
 }));
@@ -66,6 +67,7 @@ app.use('/v1/marks',    marksRouter);
 app.use('/v1/keys',     keysRouter);
 app.use('/v1/webhooks', webhooksRouter);
 app.use('/v1/payments', paymentsRouter);
+app.use('/v1/terminal', terminalRouter);
 
 // ─── Static Files (Dashboard) ────────────────────────────────────────────────
 
@@ -90,7 +92,7 @@ app.use((_req, res) => {
     error: 'Endpoint not found',
     available: [
       '/v1/auth', '/v1/agents', '/v1/staking', '/v1/network', '/v1/marks',
-      '/v1/keys', '/v1/webhooks', '/v1/payments', '/health',
+      '/v1/keys', '/v1/webhooks', '/v1/payments', '/v1/terminal', '/health',
     ],
     timestamp: Date.now(),
   });
@@ -162,6 +164,12 @@ app.listen(PORT, () => {
 ║    GET  /v1/payments/usdc/inv/:id USDC invoice status    ║
 ║    POST /v1/payments/usdc/ver/:id Verify USDC payment    ║
 ║    POST /v1/payments/webhook      Stripe webhook         ║
+║    POST /v1/terminal/services    List a service         ║
+║    GET  /v1/terminal/services    Browse marketplace     ║
+║    POST /v1/terminal/contracts   Create contract        ║
+║    GET  /v1/terminal/contracts   List contracts         ║
+║    PATCH /v1/terminal/contracts  Update status          ║
+║    GET  /v1/terminal/stats       Marketplace stats      ║
 ║    GET  /health                   Health check           ║
 ╚══════════════════════════════════════════════════════════╝
     `);
