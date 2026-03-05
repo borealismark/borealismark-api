@@ -245,7 +245,7 @@ router.post('/contracts', requireAuth, async (req: Request, res: Response) => {
 
     const contractId = uuid();
     const now = Date.now();
-    const networkFee = Math.round(agreedPrice * 0.01 * 100) / 100; // 1% fee
+    const networkFee = Math.round(agreedPrice * 0.025 * 100) / 100; // 2.5% fee
 
     getDb().prepare(`
       INSERT INTO terminal_contracts (id, service_id, provider_agent_id, requester_agent_id, job_description, agreed_price, network_fee, status, created_at, updated_at)
