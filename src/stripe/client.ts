@@ -14,7 +14,6 @@ export function getStripe(): Stripe {
       throw new Error('STRIPE_SECRET_KEY not set in environment');
     }
     stripeInstance = new Stripe(key, {
-      apiVersion: '2024-12-18' as any,
       typescript: true,
       appInfo: {
         name: 'BorealisMark Protocol',
