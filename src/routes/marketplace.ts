@@ -2078,7 +2078,7 @@ router.post('/listings/bulk', requireAuth, async (req: Request, res: Response) =
         const now = Date.now();
 
         // Run content moderation
-        const moderation = moderateListing(userId, 'elite', item.title, item.description, item.tags || []);
+        const moderation = moderateListing(userId, 'sovereign', item.title, item.description, item.tags || []);
 
         // If blocked, skip this item
         if (moderation.status === 'blocked') {
