@@ -626,6 +626,64 @@ function initSchema(db: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_exchange_pair ON exchange_rates_cache(from_currency, to_currency);
     CREATE INDEX IF NOT EXISTS idx_exchange_expires ON exchange_rates_cache(expires_at);
+
+    CREATE TABLE IF NOT EXISTS ebay_store_imports (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      store_url TEXT NOT NULL,
+      store_name TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      listings_found INTEGER DEFAULT 0,
+      listings_imported INTEGER DEFAULT 0,
+      listings_failed INTEGER DEFAULT 0,
+      error_message TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      completed_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_ebay_imports_user ON ebay_store_imports(user_id);
+
+    CREATE TABLE IF NOT EXISTS marketing_campaigns (
+      id TEXT PRIMARY KEY,
+      listing_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      platform TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'draft',
+      campaign_copy TEXT,
+      hashtags TEXT DEFAULT '[]',
+      image_urls TEXT DEFAULT '[]',
+      tracking_code TEXT UNIQUE,
+      tracking_url TEXT,
+      external_post_id TEXT,
+      external_post_url TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      posted_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_campaigns_user ON marketing_campaigns(user_id);
+    CREATE INDEX IF NOT EXISTS idx_campaigns_listing ON marketing_campaigns(listing_id);
+    CREATE INDEX IF NOT EXISTS idx_campaigns_tracking ON marketing_campaigns(tracking_code);
+
+    CREATE TABLE IF NOT EXISTS referral_clicks (
+      id TEXT PRIMARY KEY,
+      campaign_id TEXT NOT NULL,
+      tracking_code TEXT NOT NULL,
+      source_platform TEXT,
+      referrer_url TEXT,
+      user_agent TEXT,
+      ip_hash TEXT,
+      clicked_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_clicks_campaign ON referral_clicks(campaign_id);
+    CREATE INDEX IF NOT EXISTS idx_clicks_code ON referral_clicks(tracking_code);
+
+    CREATE TABLE IF NOT EXISTS marketing_conversions (
+      id TEXT PRIMARY KEY,
+      campaign_id TEXT,
+      click_id TEXT,
+      listing_id TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      converted_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_conversions_campaign ON marketing_conversions(campaign_id);
   `);
 
   // Migrate: add CAD pricing + shipping columns to marketplace_listings

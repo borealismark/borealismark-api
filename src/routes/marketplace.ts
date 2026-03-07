@@ -58,6 +58,8 @@ import {
   addProhibitedItem,
   removeProhibitedItem,
 } from '../db/database';
+import { importEbayStore } from '../services/ebayScraper';
+import { createHash } from 'crypto';
 
 const router = Router();
 
@@ -2314,6 +2316,354 @@ router.post('/admin/reassign', requireAuth, async (req: Request, res: Response) 
     logger.info('Listings reassigned', { from: fromUserId, to: toUserId, count: result.changes });
 
     res.json({ success: true, reassigned: result.changes });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ─── eBay Store Import ──────────────────────────────────────────────────────
+
+/**
+ * POST /v1/marketplace/ebay-import — Start importing an eBay store
+ * Requires Pro tier or above. Visible to all, gated by tier.
+ */
+router.post('/ebay-import', requireAuth, async (req: Request, res: Response) => {
+  try {
+    const authReq = req as AuthRequest;
+    const userId = authReq.user?.sub;
+    if (!userId) return res.status(401).json({ success: false, error: 'Not authenticated' });
+
+    // Check tier — Pro or above required
+    const user = getDb().prepare('SELECT tier, role FROM users WHERE id = ?').get(userId) as any;
+    if (!user) return res.status(404).json({ success: false, error: 'User not found' });
+
+    const allowedTiers = ['pro', 'enterprise', 'sovereign'];
+    if (user.role !== 'admin' && !allowedTiers.includes(user.tier?.toLowerCase())) {
+      return res.status(403).json({
+        success: false,
+        error: 'eBay Store Import requires a Pro tier or above subscription.',
+        requiredTier: 'pro'
+      });
+    }
+
+    const { storeUrl, storeName } = req.body;
+    if (!storeUrl) return res.status(400).json({ success: false, error: 'storeUrl is required' });
+
+    // Validate it looks like an eBay store URL
+    if (!storeUrl.includes('ebay.com/str/') && !storeUrl.includes('ebay.ca/str/') && !storeUrl.includes('ebay.co.uk/str/')) {
+      return res.status(400).json({ success: false, error: 'Invalid eBay store URL. Expected format: https://www.ebay.com/str/YourStoreName' });
+    }
+
+    // Check for existing active import
+    const activeImport = getDb().prepare(
+      "SELECT id, status FROM ebay_store_imports WHERE user_id = ? AND status IN ('pending', 'scraping', 'importing')"
+    ).get(userId) as any;
+    if (activeImport) {
+      return res.status(409).json({
+        success: false,
+        error: 'You already have an active import in progress.',
+        importId: activeImport.id,
+        status: activeImport.status
+      });
+    }
+
+    const importId = uuid();
+    const name = storeName || storeUrl.split('/str/')[1]?.split('?')[0] || 'My eBay Store';
+
+    getDb().prepare(
+      'INSERT INTO ebay_store_imports (id, user_id, store_url, store_name, status) VALUES (?, ?, ?, ?, ?)'
+    ).run(importId, userId, storeUrl, name, 'pending');
+
+    // Kick off async import (don't await — return immediately)
+    importEbayStore(importId, userId, storeUrl, name).catch(err => {
+      logger.error(`[eBay Import] Async import failed: ${err.message}`);
+    });
+
+    res.status(202).json({
+      success: true,
+      importId,
+      message: 'Import started. Poll GET /v1/marketplace/ebay-import/' + importId + ' for progress.'
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * GET /v1/marketplace/ebay-import/:id — Poll import status
+ */
+router.get('/ebay-import/:id', requireAuth, async (req: Request, res: Response) => {
+  try {
+    const authReq = req as AuthRequest;
+    const userId = authReq.user?.sub;
+    if (!userId) return res.status(401).json({ success: false, error: 'Not authenticated' });
+
+    const importJob = getDb().prepare(
+      'SELECT * FROM ebay_store_imports WHERE id = ? AND user_id = ?'
+    ).get(req.params.id, userId) as any;
+
+    if (!importJob) return res.status(404).json({ success: false, error: 'Import job not found' });
+
+    res.json({
+      success: true,
+      data: {
+        id: importJob.id,
+        storeUrl: importJob.store_url,
+        storeName: importJob.store_name,
+        status: importJob.status,
+        listingsFound: importJob.listings_found,
+        listingsImported: importJob.listings_imported,
+        listingsFailed: importJob.listings_failed,
+        errorMessage: importJob.error_message,
+        createdAt: importJob.created_at,
+        completedAt: importJob.completed_at
+      }
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * GET /v1/marketplace/ebay-import — List user's import jobs
+ */
+router.get('/ebay-imports', requireAuth, async (req: Request, res: Response) => {
+  try {
+    const authReq = req as AuthRequest;
+    const userId = authReq.user?.sub;
+    if (!userId) return res.status(401).json({ success: false, error: 'Not authenticated' });
+
+    const imports = getDb().prepare(
+      'SELECT * FROM ebay_store_imports WHERE user_id = ? ORDER BY created_at DESC LIMIT 10'
+    ).all(userId) as any[];
+
+    res.json({
+      success: true,
+      data: imports.map((j: any) => ({
+        id: j.id,
+        storeUrl: j.store_url,
+        storeName: j.store_name,
+        status: j.status,
+        listingsFound: j.listings_found,
+        listingsImported: j.listings_imported,
+        listingsFailed: j.listings_failed,
+        createdAt: j.created_at,
+        completedAt: j.completed_at
+      }))
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ─── Marketing Campaigns & Referral Tracking ────────────────────────────────
+
+/**
+ * GET /r/:code — Public referral redirect (no auth)
+ */
+router.get('/r/:code', async (req: Request, res: Response) => {
+  try {
+    const { code } = req.params;
+    const campaign = getDb().prepare(
+      'SELECT id, listing_id, platform FROM marketing_campaigns WHERE tracking_code = ?'
+    ).get(code) as any;
+
+    if (!campaign) {
+      return res.redirect('https://borealisterminal.com/#browse');
+    }
+
+    // Log the click
+    const clickId = uuid();
+    const ipRaw = req.ip || req.headers['x-forwarded-for'] || 'unknown';
+    const ipHash = createHash('sha256').update(String(ipRaw)).digest('hex').substring(0, 16);
+
+    getDb().prepare(
+      'INSERT INTO referral_clicks (id, campaign_id, tracking_code, source_platform, referrer_url, user_agent, ip_hash) VALUES (?, ?, ?, ?, ?, ?, ?)'
+    ).run(clickId, campaign.id, code, campaign.platform, req.headers.referer || '', req.headers['user-agent'] || '', ipHash);
+
+    // Redirect to listing
+    res.redirect(`https://borealisterminal.com/#listing/${campaign.listing_id}?ref=${code}`);
+  } catch (err: any) {
+    res.redirect('https://borealisterminal.com/#browse');
+  }
+});
+
+/**
+ * POST /v1/marketplace/campaigns — Create a marketing campaign for a listing
+ */
+router.post('/campaigns', requireAuth, async (req: Request, res: Response) => {
+  try {
+    const authReq = req as AuthRequest;
+    const userId = authReq.user?.sub;
+    if (!userId) return res.status(401).json({ success: false, error: 'Not authenticated' });
+
+    const { listingId, platform } = req.body;
+    if (!listingId || !platform) return res.status(400).json({ success: false, error: 'listingId and platform required' });
+
+    const validPlatforms = ['x', 'instagram', 'facebook', 'general'];
+    if (!validPlatforms.includes(platform)) {
+      return res.status(400).json({ success: false, error: 'Invalid platform. Use: x, instagram, facebook, or general' });
+    }
+
+    // Verify listing belongs to user
+    const listing = getDb().prepare(
+      'SELECT id, title, description, price_cad, images, category, condition FROM marketplace_listings WHERE id = ? AND user_id = ?'
+    ).get(listingId, userId) as any;
+    if (!listing) return res.status(404).json({ success: false, error: 'Listing not found or not yours' });
+
+    // Generate tracking code (8 char alphanumeric)
+    const trackingCode = uuid().replace(/-/g, '').substring(0, 8);
+    const trackingUrl = `https://borealismark-api.onrender.com/v1/marketplace/r/${trackingCode}`;
+
+    // Generate AI copy based on platform
+    const price = listing.price_cad ? `$${listing.price_cad.toFixed(2)} CAD` : 'Contact for price';
+    const title = listing.title || 'Great product';
+    const desc = listing.description || title;
+    const condition = listing.condition || '';
+    let images: string[] = [];
+    try { images = JSON.parse(listing.images || '[]'); } catch(e) { images = []; }
+
+    let campaignCopy = '';
+    let hashtags: string[] = [];
+
+    if (platform === 'x') {
+      // Twitter: 280 char limit
+      hashtags = ['#BorealisTerminal', '#TrustGated'];
+      if (listing.category) hashtags.push('#' + listing.category.replace(/-/g, ''));
+      const hashStr = hashtags.join(' ');
+      const maxTitleLen = 280 - price.length - hashStr.length - trackingUrl.length - 10;
+      const shortTitle = title.length > maxTitleLen ? title.substring(0, maxTitleLen - 3) + '...' : title;
+      campaignCopy = `${shortTitle}\n${price}\n\n${hashStr}\n${trackingUrl}`;
+    } else if (platform === 'instagram') {
+      hashtags = ['#BorealisTerminal', '#TrustGated', '#OnlineShopping', '#VerifiedSeller'];
+      if (listing.category) hashtags.push('#' + listing.category.replace(/-/g, ''));
+      if (condition) hashtags.push('#' + condition.replace(/\s+/g, ''));
+      campaignCopy = `${title}\n\n${desc.substring(0, 300)}\n\n${price}\n\nShop securely on Borealis Terminal — the trust-gated marketplace.\nLink in bio\n\n${hashtags.join(' ')}`;
+    } else {
+      // General / Facebook
+      hashtags = ['#BorealisTerminal', '#TrustGated'];
+      campaignCopy = `${title}\n\n${desc.substring(0, 500)}\n\nPrice: ${price}${condition ? ' | Condition: ' + condition : ''}\n\nShop with confidence on Borealis Terminal:\n${trackingUrl}\n\n${hashtags.join(' ')}`;
+    }
+
+    const campaignId = uuid();
+    getDb().prepare(`
+      INSERT INTO marketing_campaigns (id, listing_id, user_id, platform, status, campaign_copy, hashtags, image_urls, tracking_code, tracking_url)
+      VALUES (?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?)
+    `).run(
+      campaignId, listingId, userId, platform,
+      campaignCopy, JSON.stringify(hashtags), JSON.stringify(images.slice(0, 4)),
+      trackingCode, trackingUrl
+    );
+
+    res.json({
+      success: true,
+      data: {
+        id: campaignId,
+        platform,
+        trackingCode,
+        trackingUrl,
+        campaignCopy,
+        hashtags,
+        imageUrls: images.slice(0, 4)
+      }
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * GET /v1/marketplace/campaigns — List user's campaigns with click counts
+ */
+router.get('/campaigns', requireAuth, async (req: Request, res: Response) => {
+  try {
+    const authReq = req as AuthRequest;
+    const userId = authReq.user?.sub;
+    if (!userId) return res.status(401).json({ success: false, error: 'Not authenticated' });
+
+    const campaigns = getDb().prepare(`
+      SELECT mc.*, ml.title as listing_title,
+        (SELECT COUNT(*) FROM referral_clicks WHERE campaign_id = mc.id) as click_count
+      FROM marketing_campaigns mc
+      LEFT JOIN marketplace_listings ml ON ml.id = mc.listing_id
+      WHERE mc.user_id = ?
+      ORDER BY mc.created_at DESC
+      LIMIT 50
+    `).all(userId) as any[];
+
+    res.json({
+      success: true,
+      data: campaigns.map((c: any) => ({
+        id: c.id,
+        listingId: c.listing_id,
+        listingTitle: c.listing_title,
+        platform: c.platform,
+        status: c.status,
+        campaignCopy: c.campaign_copy,
+        hashtags: JSON.parse(c.hashtags || '[]'),
+        imageUrls: JSON.parse(c.image_urls || '[]'),
+        trackingCode: c.tracking_code,
+        trackingUrl: c.tracking_url,
+        clickCount: c.click_count,
+        createdAt: c.created_at,
+        postedAt: c.posted_at
+      }))
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * GET /v1/marketplace/campaigns/:id/analytics — Detailed campaign analytics
+ */
+router.get('/campaigns/:id/analytics', requireAuth, async (req: Request, res: Response) => {
+  try {
+    const authReq = req as AuthRequest;
+    const userId = authReq.user?.sub;
+    if (!userId) return res.status(401).json({ success: false, error: 'Not authenticated' });
+
+    const campaign = getDb().prepare(
+      'SELECT * FROM marketing_campaigns WHERE id = ? AND user_id = ?'
+    ).get(req.params.id, userId) as any;
+    if (!campaign) return res.status(404).json({ success: false, error: 'Campaign not found' });
+
+    const clicks = getDb().prepare(
+      'SELECT * FROM referral_clicks WHERE campaign_id = ? ORDER BY clicked_at DESC LIMIT 100'
+    ).all(campaign.id) as any[];
+
+    const conversions = getDb().prepare(
+      'SELECT * FROM marketing_conversions WHERE campaign_id = ? ORDER BY converted_at DESC LIMIT 100'
+    ).all(campaign.id) as any[];
+
+    // Click stats by day
+    const clicksByDay = getDb().prepare(`
+      SELECT date(clicked_at) as day, COUNT(*) as count
+      FROM referral_clicks WHERE campaign_id = ?
+      GROUP BY date(clicked_at) ORDER BY day DESC LIMIT 30
+    `).all(campaign.id) as any[];
+
+    res.json({
+      success: true,
+      data: {
+        campaign: {
+          id: campaign.id,
+          platform: campaign.platform,
+          trackingCode: campaign.tracking_code,
+          trackingUrl: campaign.tracking_url,
+          createdAt: campaign.created_at
+        },
+        totalClicks: clicks.length,
+        totalConversions: conversions.length,
+        ctr: clicks.length > 0 ? ((conversions.length / clicks.length) * 100).toFixed(1) + '%' : '0%',
+        clicksByDay,
+        recentClicks: clicks.slice(0, 20).map((c: any) => ({
+          clickedAt: c.clicked_at,
+          sourcePlatform: c.source_platform,
+          referrer: c.referrer_url
+        }))
+      }
+    });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }
