@@ -2109,6 +2109,53 @@ const BulkImportSchema = z.object({
 });
 
 /**
+ * PATCH /v1/marketplace/listings/bulk-update — Admin bulk update images & shipping
+ * Body: { updates: [{ id, images?, shippingCostCad? }] }
+ */
+router.patch('/listings/bulk-update', requireAuth, async (req: Request, res: Response) => {
+  try {
+    const authReq = req as AuthRequest;
+    const userTier = authReq.user?.tier ?? 'standard';
+    if (!['admin', 'sovereign'].includes(userTier)) {
+      return res.status(403).json({ success: false, error: 'Admin access required' });
+    }
+
+    const { updates } = req.body;
+    if (!Array.isArray(updates) || updates.length === 0) {
+      return res.status(400).json({ success: false, error: 'updates array required' });
+    }
+
+    const db = getDb();
+    const stmt = db.prepare('UPDATE marketplace_listings SET images = ?, shipping_cost_cad = ?, updated_at = ? WHERE id = ?');
+    let updated = 0;
+    let errors: string[] = [];
+
+    for (const u of updates) {
+      try {
+        if (!u.id) { errors.push('Missing id'); continue; }
+        const images = u.images ? JSON.stringify(u.images) : undefined;
+        const shipping = typeof u.shippingCostCad === 'number' ? u.shippingCostCad : undefined;
+        if (!images && shipping === undefined) { continue; }
+
+        const existing = db.prepare('SELECT id, images, shipping_cost_cad FROM marketplace_listings WHERE id = ?').get(u.id) as any;
+        if (!existing) { errors.push(`Not found: ${u.id}`); continue; }
+
+        const finalImages = images || existing.images;
+        const finalShipping = shipping !== undefined ? shipping : (existing.shipping_cost_cad || 0);
+        stmt.run(finalImages, finalShipping, Date.now(), u.id);
+        updated++;
+      } catch (e: any) {
+        errors.push(`${u.id}: ${e.message}`);
+      }
+    }
+
+    res.json({ success: true, updated, errors: errors.length > 0 ? errors : undefined, total: updates.length });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
  * POST /v1/marketplace/listings/bulk — Bulk import listings (admin only)
  */
 router.post('/listings/bulk', requireAuth, async (req: Request, res: Response) => {
