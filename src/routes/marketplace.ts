@@ -2122,4 +2122,28 @@ router.post('/listings/bulk', requireAuth, async (req: Request, res: Response) =
   }
 });
 
+/**
+ * DELETE /v1/marketplace/listings/bulk — Admin bulk delete all own listings
+ */
+router.delete('/listings/bulk', requireAuth, async (req: Request, res: Response) => {
+  try {
+    const authReq = req as AuthRequest;
+    const userId = authReq.user?.sub;
+    if (!userId) return res.status(401).json({ success: false, error: 'Not authenticated' });
+
+    const user = getDb().prepare('SELECT role FROM users WHERE id = ?').get(userId) as any;
+    if (!user || user.role !== 'admin') {
+      return res.status(403).json({ success: false, error: 'Admin access required' });
+    }
+
+    const result = getDb().prepare('DELETE FROM marketplace_listings WHERE user_id = ?').run(userId);
+    logger.info('Bulk delete completed', { deleted: result.changes, userId });
+
+    res.json({ success: true, deleted: result.changes });
+  } catch (err: any) {
+    logger.error('Bulk delete error', { error: err.message });
+    res.status(500).json({ success: false, error: 'Failed to delete listings' });
+  }
+});
+
 export default router;
