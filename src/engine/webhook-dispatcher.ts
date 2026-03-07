@@ -1,5 +1,5 @@
 import { createHmac } from 'crypto';
-import { getWebhooksForEvent, recordWebhookDelivery } from '../db/database';
+import { getWebhooksForEvent, recordWebhookDelivery, insertDeadLetter, updateWebhookDeliveryStatus } from '../db/database';
 import { logger } from '../middleware/logger';
 
 // ─── Event Type Registry ──────────────────────────────────────────────────────
@@ -50,13 +50,22 @@ function signPayload(rawBody: string, rawSecret: string): string {
 // ─── Single Delivery ──────────────────────────────────────────────────────────
 
 const DELIVERY_TIMEOUT_MS = 10_000; // 10 seconds — firm ceiling per delivery
+const MAX_RETRY_ATTEMPTS = 5;
+const RETRY_DELAYS_MS = [10_000, 30_000, 120_000, 600_000, 3_600_000]; // 10s, 30s, 2min, 10min, 1hr
+
+function getRetryDelay(attempt: number): number {
+  const baseDelay = RETRY_DELAYS_MS[Math.min(attempt, RETRY_DELAYS_MS.length - 1)];
+  // Add jitter: ±20% randomization to prevent thundering herd
+  const jitter = baseDelay * 0.2 * (Math.random() * 2 - 1);
+  return Math.floor(baseDelay + jitter);
+}
 
 async function deliverToEndpoint(
   webhookId: string,
   url: string,
   rawSecret: string,
   payload: WebhookPayload,
-): Promise<void> {
+): Promise<{ success: boolean; httpStatus?: number; error?: string }> {
   const rawBody = JSON.stringify(payload);
   const signature = signPayload(rawBody, rawSecret);
   const startMs = Date.now();
@@ -110,6 +119,65 @@ async function deliverToEndpoint(
     responseBody?.slice(0, 1000), // cap stored response at 1KB
     Date.now() - startMs,
   );
+
+  if (success) {
+    return { success: true, httpStatus };
+  } else {
+    return {
+      success: false,
+      httpStatus,
+      error: responseBody ?? 'Unknown error',
+    };
+  }
+}
+
+// ─── Retry Logic with Exponential Backoff ────────────────────────────────────
+
+async function deliverWithRetry(
+  webhookId: string,
+  url: string,
+  rawSecret: string,
+  payload: WebhookPayload,
+): Promise<void> {
+  let lastError = '';
+
+  for (let attempt = 0; attempt <= MAX_RETRY_ATTEMPTS; attempt++) {
+    if (attempt > 0) {
+      const delay = getRetryDelay(attempt - 1);
+      logger.info(`Webhook retry ${attempt}/${MAX_RETRY_ATTEMPTS} for ${payload.event} → ${url} (delay: ${Math.round(delay / 1000)}s)`, {
+        webhookId, event: payload.event, attempt, delay,
+      });
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+
+    const result = await deliverToEndpoint(webhookId, url, rawSecret, payload);
+
+    if (result.success) {
+      if (attempt > 0) {
+        logger.info(`Webhook delivery succeeded after ${attempt} retries`, {
+          webhookId, event: payload.event, attempt,
+        });
+      }
+      updateWebhookDeliveryStatus(webhookId, 'delivered');
+      return;
+    }
+
+    lastError = result.error ?? `HTTP ${result.httpStatus}`;
+  }
+
+  // All retries exhausted — dead-letter it
+  logger.error(`Webhook delivery permanently failed after ${MAX_RETRY_ATTEMPTS} retries → dead-lettered`, {
+    webhookId, event: payload.event, lastError,
+  });
+
+  updateWebhookDeliveryStatus(webhookId, 'dead-lettered');
+  insertDeadLetter(
+    webhookId,
+    payload.event,
+    JSON.stringify(payload),
+    lastError,
+    MAX_RETRY_ATTEMPTS + 1,
+  );
 }
 
 // ─── Dispatcher ───────────────────────────────────────────────────────────────
@@ -149,11 +217,11 @@ export function dispatch(event: WebhookEvent, data: Record<string, unknown>): vo
   // Fan out asynchronously — do not await
   Promise.allSettled(
     hooks.map(hook =>
-      deliverToEndpoint(hook.id, hook.url, hook.secret, payload),
+      deliverWithRetry(hook.id, hook.url, hook.secret, payload),
     ),
   ).then(results => {
     const succeeded = results.filter(r => r.status === 'fulfilled').length;
-    logger.info(`Webhook fan-out complete: ${event} ${succeeded}/${hooks.length} succeeded`, {
+    logger.info(`Webhook fan-out complete: ${event} ${succeeded}/${hooks.length} dispatched`, {
       event,
       deliveryId: payload.id,
     });

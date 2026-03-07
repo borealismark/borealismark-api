@@ -2,7 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import path from 'path';
-import { getDb, seedProhibitedItems } from './db/database';
+import { getDb, seedProhibitedItems, seedApiTiers } from './db/database';
 import { requestLogger, logger } from './middleware/logger';
 import { globalLimiter } from './middleware/rateLimiter';
 import authRouter from './routes/auth';
@@ -15,6 +15,8 @@ import webhooksRouter from './routes/webhooks';
 import paymentsRouter from './routes/payments';
 import terminalRouter from './routes/terminal';
 import marketplaceRouter from './routes/marketplace';
+import usageRouter from './routes/usage';
+import docsRouter from './routes/docs';
 import { cleanupExpiredInvoices } from './hedera/usdc';
 import { getExpiredUsdcSubscriptions, updateUserTier } from './db/database';
 
@@ -85,6 +87,8 @@ app.use('/v1/webhooks', webhooksRouter);
 app.use('/v1/payments', paymentsRouter);
 app.use('/v1/terminal', terminalRouter);
 app.use('/v1/marketplace', marketplaceRouter);
+app.use('/v1/usage',    usageRouter);
+app.use('/v1/docs',     docsRouter);
 
 // ─── Static Files (Dashboard) ────────────────────────────────────────────────
 
@@ -109,7 +113,8 @@ app.use((_req, res) => {
     error: 'Endpoint not found',
     available: [
       '/v1/auth', '/v1/agents', '/v1/staking', '/v1/network', '/v1/marks',
-      '/v1/keys', '/v1/webhooks', '/v1/payments', '/v1/terminal', '/health',
+      '/v1/keys', '/v1/webhooks', '/v1/payments', '/v1/terminal', '/v1/marketplace',
+      '/v1/usage', '/v1/docs', '/health',
     ],
     timestamp: Date.now(),
   });
@@ -138,6 +143,9 @@ getDb();
 
 // Seed prohibited items database (idempotent — only runs on fresh DB)
 seedProhibitedItems();
+
+// Seed API tiers (idempotent — only runs on fresh DB)
+seedApiTiers();
 
 // Clean up expired USDC invoices every 5 minutes
 setInterval(() => {

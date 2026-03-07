@@ -419,6 +419,51 @@ function initSchema(db: Database.Database): void {
       active INTEGER NOT NULL DEFAULT 1
     );
     CREATE INDEX IF NOT EXISTS idx_coupons_code ON coupons(code);
+
+    -- ── API Tiers ─────────────────────────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS api_tiers (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE,
+      display_name TEXT NOT NULL,
+      monthly_request_limit INTEGER NOT NULL,
+      max_agents INTEGER NOT NULL,
+      max_webhooks INTEGER NOT NULL,
+      rate_limit_per_min INTEGER NOT NULL,
+      price_monthly_cents INTEGER NOT NULL DEFAULT 0,
+      stripe_price_id TEXT,
+      created_at INTEGER NOT NULL DEFAULT (strftime('%s','now') * 1000)
+    );
+
+    -- ── API Usage Tracking ──────────────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS api_usage (
+      id TEXT PRIMARY KEY,
+      api_key_id TEXT NOT NULL,
+      endpoint TEXT NOT NULL,
+      method TEXT NOT NULL,
+      status_code INTEGER,
+      response_time_ms INTEGER,
+      timestamp INTEGER NOT NULL,
+      month_key TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_api_usage_key_month ON api_usage(api_key_id, month_key);
+    CREATE INDEX IF NOT EXISTS idx_api_usage_timestamp ON api_usage(timestamp);
+
+    -- ── Webhook Dead Letters ────────────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS webhook_dead_letters (
+      id TEXT PRIMARY KEY,
+      webhook_id TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      payload TEXT NOT NULL,
+      last_error TEXT,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      resolved_at INTEGER,
+      FOREIGN KEY (webhook_id) REFERENCES webhooks(id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_dead_letters_webhook ON webhook_dead_letters(webhook_id);
+    CREATE INDEX IF NOT EXISTS idx_dead_letters_resolved ON webhook_dead_letters(resolved_at);
   `);
 
   // Migrate: add subscription tracking columns to users table
@@ -451,6 +496,11 @@ function initSchema(db: Database.Database): void {
   if (!keyColumns.includes('expires_at'))    db.exec("ALTER TABLE api_keys ADD COLUMN expires_at INTEGER");
   if (!keyColumns.includes('revoked_at'))    db.exec("ALTER TABLE api_keys ADD COLUMN revoked_at INTEGER");
   if (!keyColumns.includes('revoked_reason')) db.exec("ALTER TABLE api_keys ADD COLUMN revoked_reason TEXT");
+  if (!keyColumns.includes('tier'))          db.exec("ALTER TABLE api_keys ADD COLUMN tier TEXT DEFAULT 'free'");
+
+  // Migrate: add delivery status columns to webhooks
+  const webhookCols = (db.prepare("PRAGMA table_info(webhooks)").all() as Array<{ name: string }>).map(r => r.name);
+  if (!webhookCols.includes('last_delivery_status')) db.exec("ALTER TABLE webhooks ADD COLUMN last_delivery_status TEXT DEFAULT 'pending'");
 
   // Ensure the master API key exists with full admin scopes
   const masterKey = process.env.API_MASTER_KEY;
@@ -1647,4 +1697,152 @@ export function seedProhibitedItems(): void {
 
   insertMany();
   logger.info(`Seeded ${items.length} prohibited items into moderation database`);
+}
+
+// ─── API Tiers Seeding ──────────────────────────────────────────────────────
+
+export function seedApiTiers(): void {
+  const db = getDb();
+  const existing = db.prepare('SELECT COUNT(*) as count FROM api_tiers').get() as { count: number };
+  if (existing.count > 0) return; // Already seeded
+
+  const tiers = [
+    { id: 'tier_free', name: 'free', displayName: 'Free', monthlyLimit: 100, maxAgents: 1, maxWebhooks: 0, rateLimit: 10, priceCents: 0, stripePriceId: null },
+    { id: 'tier_starter', name: 'starter', displayName: 'Starter', monthlyLimit: 10000, maxAgents: 5, maxWebhooks: 3, rateLimit: 60, priceCents: 4900, stripePriceId: 'price_1T7uLtJ5qkaENvhUYrD3Ss5e' },
+    { id: 'tier_business', name: 'business', displayName: 'Business', monthlyLimit: 100000, maxAgents: 25, maxWebhooks: 10, rateLimit: 200, priceCents: 19900, stripePriceId: 'price_1T7uLrJ5qkaENvhUQ1GOXfhH' },
+    { id: 'tier_enterprise', name: 'enterprise', displayName: 'Enterprise', monthlyLimit: 1000000, maxAgents: -1, maxWebhooks: -1, rateLimit: 1000, priceCents: 49900, stripePriceId: 'price_1T7uLuJ5qkaENvhUBvPN4AXr' },
+  ];
+
+  const stmt = db.prepare(
+    `INSERT INTO api_tiers (id, name, display_name, monthly_request_limit, max_agents, max_webhooks, rate_limit_per_min, price_monthly_cents, stripe_price_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  );
+
+  for (const t of tiers) {
+    stmt.run(t.id, t.name, t.displayName, t.monthlyLimit, t.maxAgents, t.maxWebhooks, t.rateLimit, t.priceCents, t.stripePriceId);
+  }
+}
+
+// ─── API Usage Queries ──────────────────────────────────────────────────────
+
+export function recordApiUsage(apiKeyId: string, endpoint: string, method: string, statusCode: number, responseTimeMs: number): void {
+  const now = Date.now();
+  const monthKey = new Date(now).toISOString().slice(0, 7); // 'YYYY-MM'
+  getDb()
+    .prepare(
+      'INSERT INTO api_usage (id, api_key_id, endpoint, method, status_code, response_time_ms, timestamp, month_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+    )
+    .run(uuidv4(), apiKeyId, endpoint, method, statusCode, responseTimeMs, now, monthKey);
+
+  // Also increment the usage_count on the key itself
+  getDb()
+    .prepare('UPDATE api_keys SET usage_count = usage_count + 1, last_used_at = ? WHERE id = ?')
+    .run(now, apiKeyId);
+}
+
+export function getMonthlyUsageCount(apiKeyId: string, monthKey?: string): number {
+  const mk = monthKey ?? new Date().toISOString().slice(0, 7);
+  const result = getDb()
+    .prepare('SELECT COUNT(*) as count FROM api_usage WHERE api_key_id = ? AND month_key = ?')
+    .get(apiKeyId, mk) as { count: number };
+  return result.count;
+}
+
+export function getMonthlyUsageByUser(userId: string, monthKey?: string): { totalRequests: number; byKey: Array<{ keyId: string; keyName: string; count: number }> } {
+  const mk = monthKey ?? new Date().toISOString().slice(0, 7);
+  const db = getDb();
+
+  // Get all API keys owned by this user (keys are linked by checking if the user created them)
+  // Since api_keys don't have a direct user_id, we get usage across all keys
+  // For now, return aggregate usage - the JWT usage endpoint will filter by user's keys
+  const rows = db.prepare(
+    `SELECT ak.id as key_id, ak.name as key_name, COUNT(au.id) as request_count
+     FROM api_keys ak
+     LEFT JOIN api_usage au ON ak.id = au.api_key_id AND au.month_key = ?
+     WHERE ak.revoked = 0
+     GROUP BY ak.id, ak.name`
+  ).all(mk) as Array<{ key_id: string; key_name: string; request_count: number }>;
+
+  const total = rows.reduce((sum, r) => sum + r.request_count, 0);
+  return {
+    totalRequests: total,
+    byKey: rows.map(r => ({ keyId: r.key_id, keyName: r.key_name, count: r.request_count })),
+  };
+}
+
+export function getApiTier(tierName: string): { id: string; name: string; displayName: string; monthlyRequestLimit: number; maxAgents: number; maxWebhooks: number; rateLimitPerMin: number; priceMonthly: number; stripePriceId: string | null } | null {
+  const row = getDb()
+    .prepare('SELECT * FROM api_tiers WHERE name = ?')
+    .get(tierName) as Record<string, unknown> | undefined;
+  if (!row) return null;
+  return {
+    id: row.id as string,
+    name: row.name as string,
+    displayName: row.display_name as string,
+    monthlyRequestLimit: row.monthly_request_limit as number,
+    maxAgents: row.max_agents as number,
+    maxWebhooks: row.max_webhooks as number,
+    rateLimitPerMin: row.rate_limit_per_min as number,
+    priceMonthly: (row.price_monthly_cents as number) / 100,
+    stripePriceId: row.stripe_price_id as string | null,
+  };
+}
+
+export function getAllApiTiers(): Array<{ id: string; name: string; displayName: string; monthlyRequestLimit: number; maxAgents: number; maxWebhooks: number; rateLimitPerMin: number; priceMonthly: number; stripePriceId: string | null }> {
+  const rows = getDb()
+    .prepare('SELECT * FROM api_tiers ORDER BY monthly_request_limit ASC')
+    .all() as Array<Record<string, unknown>>;
+  return rows.map(row => ({
+    id: row.id as string,
+    name: row.name as string,
+    displayName: row.display_name as string,
+    monthlyRequestLimit: row.monthly_request_limit as number,
+    maxAgents: row.max_agents as number,
+    maxWebhooks: row.max_webhooks as number,
+    rateLimitPerMin: row.rate_limit_per_min as number,
+    priceMonthly: (row.price_monthly_cents as number) / 100,
+    stripePriceId: row.stripe_price_id as string | null,
+  }));
+}
+
+export function getApiKeyTier(apiKeyId: string): string {
+  const row = getDb()
+    .prepare('SELECT tier FROM api_keys WHERE id = ?')
+    .get(apiKeyId) as { tier: string } | undefined;
+  return row?.tier ?? 'free';
+}
+
+// ─── Webhook Dead Letter Queries ────────────────────────────────────────────
+
+export function insertDeadLetter(webhookId: string, eventType: string, payload: string, lastError: string, attempts: number): void {
+  getDb()
+    .prepare(
+      'INSERT INTO webhook_dead_letters (id, webhook_id, event_type, payload, last_error, attempts, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
+    )
+    .run(uuidv4(), webhookId, eventType, payload, lastError, attempts, Date.now());
+}
+
+export function getDeadLetters(limit: number = 50): Record<string, unknown>[] {
+  return getDb()
+    .prepare('SELECT * FROM webhook_dead_letters WHERE resolved_at IS NULL ORDER BY created_at DESC LIMIT ?')
+    .all(limit) as Record<string, unknown>[];
+}
+
+export function resolveDeadLetter(id: string): boolean {
+  const result = getDb()
+    .prepare('UPDATE webhook_dead_letters SET resolved_at = ? WHERE id = ?')
+    .run(Date.now(), id);
+  return result.changes > 0;
+}
+
+export function getDeadLetterById(id: string): Record<string, unknown> | undefined {
+  return getDb()
+    .prepare('SELECT * FROM webhook_dead_letters WHERE id = ?')
+    .get(id) as Record<string, unknown> | undefined;
+}
+
+export function updateWebhookDeliveryStatus(webhookId: string, status: string): void {
+  getDb()
+    .prepare('UPDATE webhooks SET last_delivery_status = ?, last_delivery_at = ? WHERE id = ?')
+    .run(status, Date.now(), webhookId);
 }
