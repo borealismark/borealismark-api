@@ -18,6 +18,7 @@ import marketplaceRouter from './routes/marketplace';
 import ordersRouter from './routes/orders';
 import usageRouter from './routes/usage';
 import docsRouter from './routes/docs';
+import imageProxyRouter from './routes/imageProxy';
 import { cleanupExpiredInvoices } from './hedera/usdc';
 import { getExpiredUsdcSubscriptions, updateUserTier } from './db/database';
 
@@ -91,10 +92,38 @@ app.use('/v1/marketplace', marketplaceRouter);
 app.use('/v1/marketplace', ordersRouter);
 app.use('/v1/usage',    usageRouter);
 app.use('/v1/docs',     docsRouter);
+app.use('/v1/images',   imageProxyRouter);
 
 // ─── Static Files (Dashboard) ────────────────────────────────────────────────
 
 app.use(express.static(path.join(__dirname, '..', 'public')));
+
+// ─── Dynamic Sitemap (for SEO) ────────────────────────────────────────────────
+
+app.get('/sitemap.xml', (_req, res) => {
+  try {
+    const db = getDb();
+    const listings = db.prepare(
+      "SELECT id, title, updated_at FROM marketplace_listings WHERE status = 'published' ORDER BY updated_at DESC LIMIT 5000"
+    ).all() as any[];
+
+    const base = 'https://borealisterminal.com';
+    let xml = '<?xml version="1.0" encoding="UTF-8"?>\n';
+    xml += '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n';
+    xml += `  <url><loc>${base}/</loc><changefreq>daily</changefreq><priority>1.0</priority></url>\n`;
+    xml += `  <url><loc>${base}/#browse</loc><changefreq>daily</changefreq><priority>0.9</priority></url>\n`;
+
+    for (const l of listings) {
+      const lastmod = l.updated_at ? new Date(typeof l.updated_at === 'number' ? l.updated_at : l.updated_at).toISOString().split('T')[0] : '';
+      xml += `  <url><loc>${base}/#listing/${l.id}</loc>${lastmod ? `<lastmod>${lastmod}</lastmod>` : ''}<changefreq>weekly</changefreq><priority>0.7</priority></url>\n`;
+    }
+
+    xml += '</urlset>';
+    res.header('Content-Type', 'application/xml').send(xml);
+  } catch (err: any) {
+    res.status(500).send('<!-- sitemap error -->');
+  }
+});
 
 // ─── Health ───────────────────────────────────────────────────────────────────
 
