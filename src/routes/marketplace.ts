@@ -356,6 +356,7 @@ router.get('/listings', async (req: Request, res: Response) => {
           hasAgent: !!l.assigned_agent_id,
           createdAt: l.created_at,
           publishedAt: l.published_at,
+          images: JSON.parse(l.images || '[]'),
         })),
         pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
       },
@@ -402,6 +403,7 @@ router.get('/listings/my', requireAuth, async (req: Request, res: Response) => {
           viewCount: l.view_count,
           createdAt: l.created_at,
           publishedAt: l.published_at,
+          images: JSON.parse(l.images || '[]'),
         })),
       },
     });
@@ -2037,10 +2039,12 @@ const BulkListingSchema = z.object({
   sku: z.string().max(100).optional(),
   externalUrl: z.string().url().max(500).optional(),
   externalSource: z.enum(['ebay', 'amazon', 'other']).optional(),
+  images: z.array(z.string().url()).max(10).optional().default([]),
 });
 
 const BulkImportSchema = z.object({
   listings: z.array(BulkListingSchema).max(100),
+  targetUserId: z.string().uuid().optional(),
 });
 
 /**
@@ -2067,6 +2071,9 @@ router.post('/listings/bulk', requireAuth, async (req: Request, res: Response) =
       });
     }
 
+    // Admin can specify a target user to import listings under
+    const targetUser = parsed.data.targetUserId || userId;
+
     let imported = 0;
     let failed = 0;
     const errors: Array<{ index: number; error: string }> = [];
@@ -2078,7 +2085,7 @@ router.post('/listings/bulk', requireAuth, async (req: Request, res: Response) =
         const now = Date.now();
 
         // Run content moderation
-        const moderation = moderateListing(userId, 'sovereign', item.title, item.description, item.tags || []);
+        const moderation = moderateListing(targetUser, 'sovereign', item.title, item.description, item.tags || []);
 
         // If blocked, skip this item
         if (moderation.status === 'blocked') {
@@ -2091,11 +2098,11 @@ router.post('/listings/bulk', requireAuth, async (req: Request, res: Response) =
         getDb().prepare(`
           INSERT INTO marketplace_listings
             (id, user_id, title, description, listing_type, category,
-             price_usdc, trade_for, tags, status, condition, platform, sku, external_url, external_source, created_at, updated_at, published_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'published', ?, ?, ?, ?, ?, ?, ?, ?)
+             price_usdc, trade_for, tags, images, status, condition, platform, sku, external_url, external_source, created_at, updated_at, published_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'published', ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
-          listingId, userId, item.title, item.description, item.listingType, item.category,
-          item.priceUsdc ?? null, item.tradeFor ?? null, JSON.stringify(item.tags || []),
+          listingId, targetUser, item.title, item.description, item.listingType, item.category,
+          item.priceUsdc ?? null, item.tradeFor ?? null, JSON.stringify(item.tags || []), JSON.stringify(item.images || []),
           item.condition ?? null, item.platform ?? null, item.sku ?? null, item.externalUrl ?? null, item.externalSource ?? null,
           now, now, now,
         );
