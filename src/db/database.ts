@@ -502,6 +502,31 @@ function initSchema(db: Database.Database): void {
   const webhookCols = (db.prepare("PRAGMA table_info(webhooks)").all() as Array<{ name: string }>).map(r => r.name);
   if (!webhookCols.includes('last_delivery_status')) db.exec("ALTER TABLE webhooks ADD COLUMN last_delivery_status TEXT DEFAULT 'pending'");
 
+  // Migrate: add new columns to marketplace_listings (Phase 1: BundlesofJoy integration)
+  const listingCols = (db.prepare("PRAGMA table_info(marketplace_listings)").all() as Array<{ name: string }>).map(r => r.name);
+  if (!listingCols.includes('condition'))       db.exec("ALTER TABLE marketplace_listings ADD COLUMN condition TEXT");
+  if (!listingCols.includes('platform'))        db.exec("ALTER TABLE marketplace_listings ADD COLUMN platform TEXT");
+  if (!listingCols.includes('sku'))             db.exec("ALTER TABLE marketplace_listings ADD COLUMN sku TEXT");
+  if (!listingCols.includes('external_url'))    db.exec("ALTER TABLE marketplace_listings ADD COLUMN external_url TEXT");
+  if (!listingCols.includes('external_source')) db.exec("ALTER TABLE marketplace_listings ADD COLUMN external_source TEXT");
+
+  // Create seller_storefronts table
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS seller_storefronts (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL UNIQUE,
+      slug TEXT NOT NULL UNIQUE,
+      store_name TEXT NOT NULL,
+      description TEXT,
+      logo_url TEXT,
+      banner_url TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_storefronts_slug ON seller_storefronts(slug);
+  `);
+
   // Ensure the master API key exists with full admin scopes
   const masterKey = process.env.API_MASTER_KEY;
   if (!masterKey) {
@@ -1845,4 +1870,64 @@ export function updateWebhookDeliveryStatus(webhookId: string, status: string): 
   getDb()
     .prepare('UPDATE webhooks SET last_delivery_status = ?, last_delivery_at = ? WHERE id = ?')
     .run(status, Date.now(), webhookId);
+}
+
+// ─── Storefront CRUD (BundlesofJoy Integration) ─────────────────────────────
+
+export function createStorefront(userId: string, slug: string, storeName: string, description?: string): string {
+  const id = uuidv4();
+  const now = Date.now();
+  getDb()
+    .prepare(`
+      INSERT INTO seller_storefronts (id, user_id, slug, store_name, description, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `)
+    .run(id, userId, slug, storeName, description ?? null, now, now);
+  return id;
+}
+
+export function getStorefrontBySlug(slug: string): Record<string, unknown> | undefined {
+  return getDb()
+    .prepare('SELECT * FROM seller_storefronts WHERE slug = ?')
+    .get(slug) as Record<string, unknown> | undefined;
+}
+
+export function getStorefrontByUserId(userId: string): Record<string, unknown> | undefined {
+  return getDb()
+    .prepare('SELECT * FROM seller_storefronts WHERE user_id = ?')
+    .get(userId) as Record<string, unknown> | undefined;
+}
+
+export function updateStorefront(
+  id: string,
+  fields: { store_name?: string; description?: string; logo_url?: string; banner_url?: string },
+): void {
+  const updates: string[] = [];
+  const values: unknown[] = [];
+
+  if (fields.store_name !== undefined) {
+    updates.push('store_name = ?');
+    values.push(fields.store_name);
+  }
+  if (fields.description !== undefined) {
+    updates.push('description = ?');
+    values.push(fields.description);
+  }
+  if (fields.logo_url !== undefined) {
+    updates.push('logo_url = ?');
+    values.push(fields.logo_url);
+  }
+  if (fields.banner_url !== undefined) {
+    updates.push('banner_url = ?');
+    values.push(fields.banner_url);
+  }
+
+  if (updates.length === 0) return;
+
+  updates.push('updated_at = ?');
+  values.push(Date.now());
+  values.push(id);
+
+  const query = `UPDATE seller_storefronts SET ${updates.join(', ')} WHERE id = ?`;
+  getDb().prepare(query).run(...values);
 }

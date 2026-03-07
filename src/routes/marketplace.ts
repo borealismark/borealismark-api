@@ -42,7 +42,7 @@ import { z } from 'zod';
 import { v4 as uuid } from 'uuid';
 import { requireAuth, type AuthRequest } from './auth';
 import { logger } from '../middleware/logger';
-import { getDb } from '../db/database';
+import { getDb, createStorefront, getStorefrontBySlug, getStorefrontByUserId, updateStorefront } from '../db/database';
 import {
   USDC_TOKEN_ID,
   TREASURY_ACCOUNT_ID,
@@ -76,6 +76,11 @@ const ListingCreateSchema = z.object({
   tradeFor: z.string().max(500).optional(),
   tags: z.array(z.string().max(30)).max(10).optional().default([]),
   agentId: z.string().uuid().optional(),
+  condition: z.enum(['new', 'like-new', 'good', 'acceptable']).optional(),
+  platform: z.enum(['ps5', 'ps4', 'xbox-series', 'xbox-one', 'switch', 'pc', 'retro', 'other']).optional(),
+  sku: z.string().max(100).optional(),
+  externalUrl: z.string().url().max(500).optional(),
+  externalSource: z.enum(['ebay', 'amazon', 'other']).optional(),
 });
 
 const ListingUpdateSchema = z.object({
@@ -131,7 +136,7 @@ router.post('/listings', requireAuth, async (req: Request, res: Response) => {
       });
     }
 
-    const { title, description, listingType, category, priceUsdc, tradeFor, tags, agentId } = parsed.data;
+    const { title, description, listingType, category, priceUsdc, tradeFor, tags, agentId, condition, platform, sku, externalUrl, externalSource } = parsed.data;
 
     // Sell and buy listings require a price
     if ((listingType === 'sell' || listingType === 'buy') && !priceUsdc) {
@@ -182,11 +187,12 @@ router.post('/listings', requireAuth, async (req: Request, res: Response) => {
       getDb().prepare(`
         INSERT INTO marketplace_listings
           (id, user_id, agent_id, title, description, listing_type, category,
-           price_usdc, trade_for, tags, status, created_at, updated_at, published_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'published', ?, ?, ?)
+           price_usdc, trade_for, tags, status, condition, platform, sku, external_url, external_source, created_at, updated_at, published_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'published', ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         listingId, userId, agentId ?? null, title, description, listingType, category,
         priceUsdc ?? null, tradeFor ?? null, JSON.stringify(tags),
+        condition ?? null, platform ?? null, sku ?? null, externalUrl ?? null, externalSource ?? null,
         now, now, now,
       );
 
@@ -218,11 +224,12 @@ router.post('/listings', requireAuth, async (req: Request, res: Response) => {
       getDb().prepare(`
         INSERT INTO marketplace_listings
           (id, user_id, agent_id, title, description, listing_type, category,
-           price_usdc, trade_for, tags, status, audit_id, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_audit', ?, ?, ?)
+           price_usdc, trade_for, tags, status, condition, platform, sku, external_url, external_source, audit_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_audit', ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         listingId, userId, agentId ?? null, title, description, listingType, category,
         priceUsdc ?? null, tradeFor ?? null, JSON.stringify(tags),
+        condition ?? null, platform ?? null, sku ?? null, externalUrl ?? null, externalSource ?? null,
         auditId, now, now,
       );
 
@@ -270,6 +277,9 @@ router.get('/listings', async (req: Request, res: Response) => {
     const category = req.query.category as string;
     const search = req.query.q as string;
     const maxPrice = req.query.maxPrice ? Number(req.query.maxPrice) : undefined;
+    const platform = req.query.platform as string;
+    const condition = req.query.condition as string;
+    const storefront = req.query.storefront as string;
     const page = Math.max(1, Number(req.query.page) || 1);
     const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 20));
 
@@ -296,6 +306,18 @@ router.get('/listings', async (req: Request, res: Response) => {
       query += ` AND l.price_usdc <= ?`;
       params.push(maxPrice);
     }
+    if (platform) {
+      query += ` AND l.platform = ?`;
+      params.push(platform);
+    }
+    if (condition) {
+      query += ` AND l.condition = ?`;
+      params.push(condition);
+    }
+    if (storefront) {
+      query += ` AND l.user_id = ?`;
+      params.push(storefront);
+    }
 
     // Count
     const countQuery = query.replace(/SELECT l\.\*, u\.name as seller_name, u\.email as seller_email/, 'SELECT COUNT(*) as total');
@@ -319,6 +341,11 @@ router.get('/listings', async (req: Request, res: Response) => {
           priceUsdc: l.price_usdc,
           tradeFor: l.trade_for,
           tags: JSON.parse(l.tags || '[]'),
+          condition: l.condition,
+          platform: l.platform,
+          sku: l.sku,
+          externalUrl: l.external_url,
+          externalSource: l.external_source,
           sellerName: l.seller_name,
           sellerId: l.user_id,
           sellerTier: l.seller_tier || 'standard',
@@ -416,6 +443,11 @@ router.get('/listings/:id', async (req: Request, res: Response) => {
         priceUsdc: listing.price_usdc,
         tradeFor: listing.trade_for,
         tags: JSON.parse(listing.tags || '[]'),
+        condition: listing.condition,
+        platform: listing.platform,
+        sku: listing.sku,
+        externalUrl: listing.external_url,
+        externalSource: listing.external_source,
         sellerName: listing.seller_name,
         status: listing.status,
         hasAgent: !!listing.assigned_agent_id,
@@ -1736,6 +1768,350 @@ router.get('/my-watchlist-ids', requireAuth, async (req: Request, res: Response)
   } catch (err: any) {
     logger.error('Watchlist IDs error', { error: err.message });
     res.status(500).json({ success: false, error: 'Failed to fetch watchlist IDs' });
+  }
+});
+
+// ─── Storefronts ─────────────────────────────────────────────────────────────
+
+const StorefrontCreateSchema = z.object({
+  slug: z.string().min(3).max(50).regex(/^[a-z0-9-]+$/),
+  storeName: z.string().min(2).max(100),
+  description: z.string().max(1000).optional(),
+  logoUrl: z.string().url().max(500).optional(),
+  bannerUrl: z.string().url().max(500).optional(),
+});
+
+/**
+ * POST /v1/marketplace/storefronts — Create a new seller storefront
+ */
+router.post('/storefronts', requireAuth, async (req: Request, res: Response) => {
+  try {
+    const authReq = req as AuthRequest;
+    const userId = authReq.user?.sub;
+    if (!userId) return res.status(401).json({ success: false, error: 'Not authenticated' });
+
+    const parsed = StorefrontCreateSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({
+        success: false,
+        error: 'Validation failed',
+        details: parsed.error.flatten().fieldErrors,
+      });
+    }
+
+    // Check if user already has a storefront
+    const existingStorefront = getStorefrontByUserId(userId);
+    if (existingStorefront) {
+      return res.status(400).json({
+        success: false,
+        error: 'User already has a storefront',
+      });
+    }
+
+    // Check if slug is already taken
+    const slugTaken = getStorefrontBySlug(parsed.data.slug);
+    if (slugTaken) {
+      return res.status(400).json({
+        success: false,
+        error: 'Slug is already taken',
+      });
+    }
+
+    const storefrontId = createStorefront(
+      userId,
+      parsed.data.slug,
+      parsed.data.storeName,
+      parsed.data.description,
+    );
+
+    // Update with logo and banner URLs if provided
+    if (parsed.data.logoUrl || parsed.data.bannerUrl) {
+      updateStorefront(storefrontId, {
+        logo_url: parsed.data.logoUrl,
+        banner_url: parsed.data.bannerUrl,
+      });
+    }
+
+    const storefront = getDb()
+      .prepare('SELECT * FROM seller_storefronts WHERE id = ?')
+      .get(storefrontId) as any;
+
+    logger.info('Storefront created', { storefrontId, userId, slug: parsed.data.slug });
+
+    res.status(201).json({
+      success: true,
+      data: {
+        id: storefront.id,
+        userId: storefront.user_id,
+        slug: storefront.slug,
+        storeName: storefront.store_name,
+        description: storefront.description,
+        logoUrl: storefront.logo_url,
+        bannerUrl: storefront.banner_url,
+        createdAt: storefront.created_at,
+        updatedAt: storefront.updated_at,
+      },
+    });
+  } catch (err: any) {
+    logger.error('Storefront creation error', { error: err.message });
+    res.status(500).json({ success: false, error: 'Failed to create storefront' });
+  }
+});
+
+/**
+ * GET /v1/marketplace/storefronts/:slug — Get storefront details and listings (PUBLIC)
+ */
+router.get('/storefronts/:slug', async (req: Request, res: Response) => {
+  try {
+    const storefront = getStorefrontBySlug(req.params.slug);
+    if (!storefront) {
+      return res.status(404).json({ success: false, error: 'Storefront not found' });
+    }
+
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 20));
+    const category = req.query.category as string;
+    const platform = req.query.platform as string;
+    const condition = req.query.condition as string;
+    const search = req.query.q as string;
+    const sort = (req.query.sort || 'created_at') as string;
+
+    let query = `SELECT l.*, u.name as seller_name, u.tier as seller_tier, u.created_at as seller_created_at,
+                 (SELECT COUNT(*) FROM listing_likes WHERE listing_id = l.id) as like_count
+                 FROM marketplace_listings l
+                 JOIN users u ON l.user_id = u.id
+                 WHERE l.status = 'published' AND l.user_id = ?`;
+    const params: any[] = [(storefront as any).user_id];
+
+    if (category) {
+      query += ` AND l.category = ?`;
+      params.push(category);
+    }
+    if (platform) {
+      query += ` AND l.platform = ?`;
+      params.push(platform);
+    }
+    if (condition) {
+      query += ` AND l.condition = ?`;
+      params.push(condition);
+    }
+    if (search) {
+      query += ` AND (l.title LIKE ? OR l.description LIKE ?)`;
+      params.push(`%${search}%`, `%${search}%`);
+    }
+
+    // Count
+    const countQuery = query.replace(/SELECT l\.\*, u\.name/, 'SELECT COUNT(*) as total');
+    const { total } = getDb().prepare(countQuery).get(...params) as any;
+
+    // Sorting
+    const validSorts = ['created_at', 'price_usdc', 'view_count'];
+    const sortField = validSorts.includes(sort) ? sort : 'created_at';
+    query += ` ORDER BY l.${sortField} DESC LIMIT ? OFFSET ?`;
+    params.push(limit, (page - 1) * limit);
+
+    const listings = getDb().prepare(query).all(...params) as any[];
+
+    res.json({
+      success: true,
+      data: {
+        storefront: {
+          id: (storefront as any).id,
+          slug: (storefront as any).slug,
+          storeName: (storefront as any).store_name,
+          description: (storefront as any).description,
+          logoUrl: (storefront as any).logo_url,
+          bannerUrl: (storefront as any).banner_url,
+          createdAt: (storefront as any).created_at,
+        },
+        listings: listings.map(l => ({
+          id: l.id,
+          title: l.title,
+          description: l.description,
+          listingType: l.listing_type,
+          category: l.category,
+          priceUsdc: l.price_usdc,
+          condition: l.condition,
+          platform: l.platform,
+          sku: l.sku,
+          tags: JSON.parse(l.tags || '[]'),
+          sellerVerified: l.seller_tier === 'pro' || l.seller_tier === 'elite',
+          likeCount: l.like_count || 0,
+          viewCount: l.view_count,
+          createdAt: l.created_at,
+        })),
+        pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+      },
+    });
+  } catch (err: any) {
+    logger.error('Storefront fetch error', { error: err.message });
+    res.status(500).json({ success: false, error: 'Failed to fetch storefront' });
+  }
+});
+
+/**
+ * PATCH /v1/marketplace/storefronts/:slug — Update storefront (owner only)
+ */
+router.patch('/storefronts/:slug', requireAuth, async (req: Request, res: Response) => {
+  try {
+    const authReq = req as AuthRequest;
+    const userId = authReq.user?.sub;
+    if (!userId) return res.status(401).json({ success: false, error: 'Not authenticated' });
+
+    const storefront = getStorefrontBySlug(req.params.slug);
+    if (!storefront) {
+      return res.status(404).json({ success: false, error: 'Storefront not found' });
+    }
+
+    if ((storefront as any).user_id !== userId) {
+      return res.status(403).json({ success: false, error: 'Unauthorized' });
+    }
+
+    const parsed = StorefrontCreateSchema.partial().safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({
+        success: false,
+        error: 'Validation failed',
+        details: parsed.error.flatten().fieldErrors,
+      });
+    }
+
+    const updates: Record<string, any> = {};
+    if (parsed.data.storeName) updates.store_name = parsed.data.storeName;
+    if (parsed.data.description !== undefined) updates.description = parsed.data.description;
+    if (parsed.data.logoUrl !== undefined) updates.logo_url = parsed.data.logoUrl;
+    if (parsed.data.bannerUrl !== undefined) updates.banner_url = parsed.data.bannerUrl;
+
+    if (Object.keys(updates).length > 0) {
+      updateStorefront((storefront as any).id, updates);
+    }
+
+    const updated = getDb()
+      .prepare('SELECT * FROM seller_storefronts WHERE id = ?')
+      .get((storefront as any).id) as any;
+
+    logger.info('Storefront updated', { storefrontId: updated.id, userId });
+
+    res.json({
+      success: true,
+      data: {
+        id: updated.id,
+        userId: updated.user_id,
+        slug: updated.slug,
+        storeName: updated.store_name,
+        description: updated.description,
+        logoUrl: updated.logo_url,
+        bannerUrl: updated.banner_url,
+        updatedAt: updated.updated_at,
+      },
+    });
+  } catch (err: any) {
+    logger.error('Storefront update error', { error: err.message });
+    res.status(500).json({ success: false, error: 'Failed to update storefront' });
+  }
+});
+
+// ─── Bulk Import ──────────────────────────────────────────────────────────────
+
+const BulkListingSchema = z.object({
+  title: z.string().min(3).max(200),
+  description: z.string().min(10).max(5000),
+  listingType: z.enum(['sell', 'buy', 'trade']),
+  category: z.enum([
+    'digital-goods', 'physical-goods', 'services', 'ai-models',
+    'datasets', 'consulting', 'creative', 'development',
+    'marketing', 'other',
+  ]),
+  priceUsdc: z.number().min(0).max(1000000).optional(),
+  tradeFor: z.string().max(500).optional(),
+  tags: z.array(z.string().max(30)).max(10).optional().default([]),
+  condition: z.enum(['new', 'like-new', 'good', 'acceptable']).optional(),
+  platform: z.enum(['ps5', 'ps4', 'xbox-series', 'xbox-one', 'switch', 'pc', 'retro', 'other']).optional(),
+  sku: z.string().max(100).optional(),
+  externalUrl: z.string().url().max(500).optional(),
+  externalSource: z.enum(['ebay', 'amazon', 'other']).optional(),
+});
+
+const BulkImportSchema = z.object({
+  listings: z.array(BulkListingSchema).max(100),
+});
+
+/**
+ * POST /v1/marketplace/listings/bulk — Bulk import listings (admin only)
+ */
+router.post('/listings/bulk', requireAuth, async (req: Request, res: Response) => {
+  try {
+    const authReq = req as AuthRequest;
+    const userId = authReq.user?.sub;
+    if (!userId) return res.status(401).json({ success: false, error: 'Not authenticated' });
+
+    // Check if user is admin
+    const user = getDb().prepare('SELECT role FROM users WHERE id = ?').get(userId) as any;
+    if (!user || user.role !== 'admin') {
+      return res.status(403).json({ success: false, error: 'Admin access required' });
+    }
+
+    const parsed = BulkImportSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({
+        success: false,
+        error: 'Validation failed',
+        details: parsed.error.flatten().fieldErrors,
+      });
+    }
+
+    let imported = 0;
+    let failed = 0;
+    const errors: Array<{ index: number; error: string }> = [];
+
+    for (let i = 0; i < parsed.data.listings.length; i++) {
+      try {
+        const item = parsed.data.listings[i];
+        const listingId = uuid();
+        const now = Date.now();
+
+        // Run content moderation
+        const moderation = moderateListing(userId, 'elite', item.title, item.description, item.tags || []);
+
+        // If blocked, skip this item
+        if (moderation.status === 'blocked') {
+          failed++;
+          errors.push({ index: i, error: moderation.reason });
+          continue;
+        }
+
+        // Admin bulk import always publishes automatically
+        getDb().prepare(`
+          INSERT INTO marketplace_listings
+            (id, user_id, title, description, listing_type, category,
+             price_usdc, trade_for, tags, status, condition, platform, sku, external_url, external_source, created_at, updated_at, published_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'published', ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          listingId, userId, item.title, item.description, item.listingType, item.category,
+          item.priceUsdc ?? null, item.tradeFor ?? null, JSON.stringify(item.tags || []),
+          item.condition ?? null, item.platform ?? null, item.sku ?? null, item.externalUrl ?? null, item.externalSource ?? null,
+          now, now, now,
+        );
+
+        imported++;
+      } catch (err: any) {
+        failed++;
+        errors.push({ index: i, error: err.message });
+      }
+    }
+
+    logger.info('Bulk import completed', { imported, failed, total: parsed.data.listings.length });
+
+    res.status(201).json({
+      success: true,
+      imported,
+      failed,
+      total: parsed.data.listings.length,
+      errors: errors.length > 0 ? errors : undefined,
+    });
+  } catch (err: any) {
+    logger.error('Bulk import error', { error: err.message });
+    res.status(500).json({ success: false, error: 'Failed to import listings' });
   }
 });
 
