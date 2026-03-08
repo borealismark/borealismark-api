@@ -2758,7 +2758,7 @@ export function getBotStats(): {
   avgStarRating: number;
   avgApPoints: number;
 } {
-  const total = getDb().prepare('SELECT COUNT(*) as cnt FROM bots WHERE status = 'active'').get() as { cnt: number };
+  const total = getDb().prepare(`SELECT COUNT(*) as cnt FROM bots WHERE status = 'active'`).get() as { cnt: number };
 
   const byTier = getDb().prepare(`
     SELECT tier, COUNT(*) as cnt FROM bots WHERE status = 'active' GROUP BY tier
@@ -2769,8 +2769,8 @@ export function getBotStats(): {
     tierMap[row.tier] = row.cnt;
   }
 
-  const avgRating = getDb().prepare('SELECT AVG(star_rating) as avg FROM bots WHERE status = 'active'').get() as { avg: number | null };
-  const avgAp = getDb().prepare('SELECT AVG(ap_points) as avg FROM bots WHERE status = 'active'').get() as { avg: number | null };
+  const avgRating = getDb().prepare(`SELECT AVG(star_rating) as avg FROM bots WHERE status = 'active'`).get() as { avg: number | null };
+  const avgAp = getDb().prepare(`SELECT AVG(ap_points) as avg FROM bots WHERE status = 'active'`).get() as { avg: number | null };
 
   return {
     totalBots: total.cnt,
