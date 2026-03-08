@@ -19,6 +19,7 @@ import ordersRouter from './routes/orders';
 import usageRouter from './routes/usage';
 import docsRouter from './routes/docs';
 import imageProxyRouter from './routes/imageProxy';
+import botsRouter from './routes/bots';
 import { cleanupExpiredInvoices } from './hedera/usdc';
 import { getExpiredUsdcSubscriptions, updateUserTier, getExpiredSanctions, upsertUserSanction } from './db/database';
 import { moderateServerSide, determineAction, actionToSanctionParams, type SanctionAction } from './middleware/messageModeration';
@@ -94,6 +95,7 @@ app.use('/v1/marketplace', ordersRouter);
 app.use('/v1/usage',    usageRouter);
 app.use('/v1/docs',     docsRouter);
 app.use('/v1/images',   imageProxyRouter);
+app.use('/v1/bots',     botsRouter);
 
 // ─── Static Files (Dashboard) ────────────────────────────────────────────────
 
@@ -146,7 +148,7 @@ app.use((_req, res) => {
     available: [
       '/v1/auth', '/v1/agents', '/v1/staking', '/v1/network', '/v1/marks',
       '/v1/keys', '/v1/webhooks', '/v1/payments', '/v1/terminal', '/v1/marketplace',
-      '/v1/usage', '/v1/docs', '/health',
+      '/v1/usage', '/v1/docs', '/v1/bots', '/health',
     ],
     timestamp: Date.now(),
   });
@@ -356,6 +358,18 @@ app.listen(PORT, () => {
 ║    GET  /v1/terminal/contracts   List contracts         ║
 ║    PATCH /v1/terminal/contracts  Update status          ║
 ║    GET  /v1/terminal/stats       Marketplace stats      ║
+║    POST /v1/bots                 Register AI bot        ║
+║    GET  /v1/bots                 List user's bots       ║
+║    GET  /v1/bots/:id             Get bot details        ║
+║    PUT  /v1/bots/:id             Update bot             ║
+║    DELETE /v1/bots/:id           Deactivate bot         ║
+║    GET  /v1/bots/leaderboard     Top bots by AP         ║
+║    POST /v1/bots/:id/jobs        Assign job to bot      ║
+║    PUT  /v1/bots/:id/jobs/:jobId Update job status      ║
+║    POST /v1/bots/:id/rate        Rate bot after job     ║
+║    GET  /v1/bots/:id/jobs        Get bot job history    ║
+║    POST /v1/bots/:id/review      Admin review bot       ║
+║    GET  /v1/bots/stats           Global bot stats       ║
 ║    GET  /health                   Health check           ║
 ╚══════════════════════════════════════════════════════════╝
     `);

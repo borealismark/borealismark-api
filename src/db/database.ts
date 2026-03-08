@@ -736,6 +736,65 @@ function initSchema(db: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_sanctions_user ON user_sanctions(user_id);
     CREATE INDEX IF NOT EXISTS idx_sanctions_status ON user_sanctions(status);
+
+    -- ── AI Bot Management ──────────────────────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS bots (
+      id TEXT PRIMARY KEY,
+      owner_id TEXT NOT NULL REFERENCES users(id),
+      name TEXT NOT NULL,
+      bio TEXT,
+      capabilities TEXT,
+      specialties TEXT,
+      avatar_url TEXT,
+      tier TEXT DEFAULT 'bronze',
+      ap_points INTEGER DEFAULT 0,
+      bm_score REAL DEFAULT 0,
+      star_rating REAL DEFAULT 0,
+      total_ratings INTEGER DEFAULT 0,
+      jobs_completed INTEGER DEFAULT 0,
+      jobs_failed INTEGER DEFAULT 0,
+      status TEXT DEFAULT 'active',
+      review_reason TEXT,
+      reviewed_by TEXT,
+      created_at INTEGER DEFAULT (strftime('%s','now') * 1000),
+      updated_at INTEGER DEFAULT (strftime('%s','now') * 1000)
+    );
+    CREATE INDEX IF NOT EXISTS idx_bots_owner ON bots(owner_id);
+    CREATE INDEX IF NOT EXISTS idx_bots_status ON bots(status);
+    CREATE INDEX IF NOT EXISTS idx_bots_tier ON bots(tier);
+    CREATE INDEX IF NOT EXISTS idx_bots_ap_points ON bots(ap_points DESC);
+
+    CREATE TABLE IF NOT EXISTS bot_jobs (
+      id TEXT PRIMARY KEY,
+      bot_id TEXT NOT NULL REFERENCES bots(id),
+      listing_id TEXT,
+      job_type TEXT NOT NULL,
+      title TEXT NOT NULL,
+      description TEXT,
+      status TEXT DEFAULT 'assigned',
+      rating REAL,
+      rating_comment TEXT,
+      ap_earned INTEGER DEFAULT 0,
+      started_at INTEGER,
+      completed_at INTEGER,
+      created_at INTEGER DEFAULT (strftime('%s','now') * 1000)
+    );
+    CREATE INDEX IF NOT EXISTS idx_bot_jobs_bot ON bot_jobs(bot_id);
+    CREATE INDEX IF NOT EXISTS idx_bot_jobs_status ON bot_jobs(status);
+    CREATE INDEX IF NOT EXISTS idx_bot_jobs_type ON bot_jobs(job_type);
+
+    CREATE TABLE IF NOT EXISTS bot_reviews (
+      id TEXT PRIMARY KEY,
+      bot_id TEXT NOT NULL REFERENCES bots(id),
+      reviewer_id TEXT NOT NULL,
+      review_type TEXT NOT NULL,
+      decision TEXT NOT NULL,
+      notes TEXT,
+      jobs_reviewed INTEGER DEFAULT 0,
+      created_at INTEGER DEFAULT (strftime('%s','now') * 1000)
+    );
+    CREATE INDEX IF NOT EXISTS idx_bot_reviews_bot ON bot_reviews(bot_id);
+    CREATE INDEX IF NOT EXISTS idx_bot_reviews_reviewer ON bot_reviews(reviewer_id);
   `);
 
   // Migrate: add CAD pricing + shipping columns to marketplace_listings
@@ -2591,4 +2650,225 @@ export function getExpiredSanctions(): Record<string, any>[] {
       WHERE (status = 'muted' AND muted_until < ?) OR (status = 'suspended' AND suspended_until < ?)
     `)
     .all(now, now) as Record<string, any>[];
+}
+
+// ─── AI Bot Queries ───────────────────────────────────────────────────────────
+
+export interface BotRecord {
+  id: string;
+  owner_id: string;
+  name: string;
+  bio?: string;
+  capabilities?: string;
+  specialties?: string;
+  avatar_url?: string;
+  tier: 'bronze' | 'silver' | 'gold' | 'platinum' | 'sovereign';
+  ap_points: number;
+  bm_score: number;
+  star_rating: number;
+  total_ratings: number;
+  jobs_completed: number;
+  jobs_failed: number;
+  status: 'active' | 'under_review' | 'suspended' | 'deactivated';
+  review_reason?: string;
+  reviewed_by?: string;
+  created_at: number;
+  updated_at: number;
+}
+
+/**
+ * Create a new bot for a user.
+ */
+export function createBot(bot: {
+  id: string;
+  owner_id: string;
+  name: string;
+  bio?: string;
+  capabilities?: string;
+  specialties?: string;
+  avatar_url?: string;
+}): BotRecord {
+  const now = Date.now();
+  getDb().prepare(`
+    INSERT INTO bots (id, owner_id, name, bio, capabilities, specialties, avatar_url, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    bot.id,
+    bot.owner_id,
+    bot.name,
+    bot.bio ?? null,
+    bot.capabilities ?? null,
+    bot.specialties ?? null,
+    bot.avatar_url ?? null,
+    now,
+    now,
+  );
+
+  return getBotById(bot.id)!;
+}
+
+/**
+ * Get a bot by ID.
+ */
+export function getBotById(botId: string): BotRecord | null {
+  return getDb().prepare('SELECT * FROM bots WHERE id = ?').get(botId) as BotRecord | null;
+}
+
+/**
+ * Get all bots for a user.
+ */
+export function getBotsByOwnerId(ownerId: string): BotRecord[] {
+  return getDb().prepare('SELECT * FROM bots WHERE owner_id = ? ORDER BY created_at DESC').all(ownerId) as BotRecord[];
+}
+
+/**
+ * Count bots for a user.
+ */
+export function countBotsByOwnerId(ownerId: string): number {
+  const result = getDb().prepare('SELECT COUNT(*) as cnt FROM bots WHERE owner_id = ?').get(ownerId) as { cnt: number };
+  return result.cnt;
+}
+
+/**
+ * Update bot details.
+ */
+export function updateBot(botId: string, updates: Partial<Omit<BotRecord, 'id' | 'created_at'>>): void {
+  const fields = Object.keys(updates).map(k => `${k} = ?`).join(', ');
+  const values = Object.values(updates);
+  getDb().prepare(`
+    UPDATE bots SET ${fields}, updated_at = ? WHERE id = ?
+  `).run(...values, Date.now(), botId);
+}
+
+/**
+ * Get bot leaderboard sorted by AP points.
+ */
+export function getBotLeaderboard(limit: number = 100): BotRecord[] {
+  return getDb().prepare(`
+    SELECT * FROM bots WHERE status = 'active' ORDER BY ap_points DESC, created_at ASC LIMIT ?
+  `).all(limit) as BotRecord[];
+}
+
+/**
+ * Get global bot statistics.
+ */
+export function getBotStats(): {
+  totalBots: number;
+  byTier: Record<string, number>;
+  avgStarRating: number;
+  avgApPoints: number;
+} {
+  const total = getDb().prepare('SELECT COUNT(*) as cnt FROM bots WHERE status = "active"').get() as { cnt: number };
+
+  const byTier = getDb().prepare(`
+    SELECT tier, COUNT(*) as cnt FROM bots WHERE status = 'active' GROUP BY tier
+  `).all() as Array<{ tier: string; cnt: number }>;
+
+  const tierMap: Record<string, number> = {};
+  for (const row of byTier) {
+    tierMap[row.tier] = row.cnt;
+  }
+
+  const avgRating = getDb().prepare('SELECT AVG(star_rating) as avg FROM bots WHERE status = "active"').get() as { avg: number | null };
+  const avgAp = getDb().prepare('SELECT AVG(ap_points) as avg FROM bots WHERE status = "active"').get() as { avg: number | null };
+
+  return {
+    totalBots: total.cnt,
+    byTier: tierMap,
+    avgStarRating: avgRating.avg ?? 0,
+    avgApPoints: avgAp.avg ?? 0,
+  };
+}
+
+/**
+ * Create a bot job.
+ */
+export function createBotJob(job: {
+  id: string;
+  bot_id: string;
+  listing_id?: string;
+  job_type: string;
+  title: string;
+  description?: string;
+}): void {
+  getDb().prepare(`
+    INSERT INTO bot_jobs (id, bot_id, listing_id, job_type, title, description, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    job.id,
+    job.bot_id,
+    job.listing_id ?? null,
+    job.job_type,
+    job.title,
+    job.description ?? null,
+    Date.now(),
+  );
+}
+
+/**
+ * Get a bot job by ID.
+ */
+export function getBotJobById(jobId: string): Record<string, any> | null {
+  return getDb().prepare('SELECT * FROM bot_jobs WHERE id = ?').get(jobId) as Record<string, any> | null;
+}
+
+/**
+ * Get all jobs for a bot.
+ */
+export function getBotJobs(botId: string, limit: number = 100): Record<string, any>[] {
+  return getDb().prepare(`
+    SELECT * FROM bot_jobs WHERE bot_id = ? ORDER BY created_at DESC LIMIT ?
+  `).all(botId, limit) as Record<string, any>[];
+}
+
+/**
+ * Update bot job status.
+ */
+export function updateBotJobStatus(
+  jobId: string,
+  status: 'assigned' | 'in_progress' | 'completed' | 'failed',
+  rating?: number,
+  ratingComment?: string,
+  apEarned?: number,
+): void {
+  const now = Date.now();
+  getDb().prepare(`
+    UPDATE bot_jobs SET status = ?, rating = ?, rating_comment = ?, ap_earned = ?, completed_at = ? WHERE id = ?
+  `).run(status, rating ?? null, ratingComment ?? null, apEarned ?? 0, now, jobId);
+}
+
+/**
+ * Create a bot review.
+ */
+export function createBotReview(review: {
+  id: string;
+  bot_id: string;
+  reviewer_id: string;
+  review_type: 're-evaluation' | 'periodic' | 'manual';
+  decision: 'approved' | 'warning' | 'suspended' | 'deactivated';
+  notes?: string;
+  jobs_reviewed?: number;
+}): void {
+  getDb().prepare(`
+    INSERT INTO bot_reviews (id, bot_id, reviewer_id, review_type, decision, notes, jobs_reviewed, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    review.id,
+    review.bot_id,
+    review.reviewer_id,
+    review.review_type,
+    review.decision,
+    review.notes ?? null,
+    review.jobs_reviewed ?? 0,
+    Date.now(),
+  );
+}
+
+/**
+ * Get bot reviews.
+ */
+export function getBotReviews(botId: string): Record<string, any>[] {
+  return getDb().prepare(`
+    SELECT * FROM bot_reviews WHERE bot_id = ? ORDER BY created_at DESC
+  `).all(botId) as Record<string, any>[];
 }
