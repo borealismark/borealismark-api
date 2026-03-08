@@ -266,6 +266,54 @@ router.get('/', requireAuth, (req: Request, res: Response) => {
   }
 });
 
+// ─── GET /v1/bots/leaderboard ────────────────────────────────────────────────
+// Public leaderboard (top bots by AP) — MUST be before /:id route
+
+router.get('/leaderboard', (req: Request, res: Response) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit as string) || 100, 1000);
+    const bots = getBotLeaderboard(limit);
+
+    const data = bots.map(bot => ({
+      id: bot.id,
+      ownerId: bot.owner_id,
+      name: bot.name,
+      tier: bot.tier,
+      apPoints: bot.ap_points,
+      starRating: bot.star_rating,
+      totalRatings: bot.total_ratings,
+      jobsCompleted: bot.jobs_completed,
+    }));
+
+    res.json({ success: true, data });
+  } catch (err: any) {
+    logger.error('Get leaderboard error', { error: err.message });
+    res.status(500).json({ success: false, error: 'Failed to get leaderboard' });
+  }
+});
+
+// ─── GET /v1/bots/stats ──────────────────────────────────────────────────────
+// Global bot stats — MUST be before /:id route
+
+router.get('/stats', (req: Request, res: Response) => {
+  try {
+    const stats = getBotStats();
+
+    res.json({
+      success: true,
+      data: {
+        totalBots: stats.totalBots,
+        byTier: stats.byTier,
+        avgStarRating: stats.avgStarRating.toFixed(2),
+        avgApPoints: stats.avgApPoints.toFixed(0),
+      },
+    });
+  } catch (err: any) {
+    logger.error('Get stats error', { error: err.message });
+    res.status(500).json({ success: false, error: 'Failed to get stats' });
+  }
+});
+
 // ─── GET /v1/bots/:id ────────────────────────────────────────────────────────
 // Get bot details
 
@@ -409,32 +457,6 @@ router.delete('/:id', requireAuth, (req: Request, res: Response) => {
   } catch (err: any) {
     logger.error('Delete bot error', { error: err.message });
     res.status(500).json({ success: false, error: 'Failed to deactivate bot' });
-  }
-});
-
-// ─── GET /v1/bots/leaderboard ────────────────────────────────────────────────
-// Public leaderboard (top bots by AP)
-
-router.get('/leaderboard', (req: Request, res: Response) => {
-  try {
-    const limit = Math.min(parseInt(req.query.limit as string) || 100, 1000);
-    const bots = getBotLeaderboard(limit);
-
-    const data = bots.map(bot => ({
-      id: bot.id,
-      ownerId: bot.owner_id,
-      name: bot.name,
-      tier: bot.tier,
-      apPoints: bot.ap_points,
-      starRating: bot.star_rating,
-      totalRatings: bot.total_ratings,
-      jobsCompleted: bot.jobs_completed,
-    }));
-
-    res.json({ success: true, data });
-  } catch (err: any) {
-    logger.error('Get leaderboard error', { error: err.message });
-    res.status(500).json({ success: false, error: 'Failed to get leaderboard' });
   }
 });
 
@@ -836,28 +858,6 @@ router.post('/:id/review', requireAuth, (req: Request, res: Response) => {
   } catch (err: any) {
     logger.error('Review bot error', { error: err.message });
     res.status(500).json({ success: false, error: 'Failed to review bot' });
-  }
-});
-
-// ─── GET /v1/bots/stats ──────────────────────────────────────────────────────
-// Global bot stats
-
-router.get('/stats', (req: Request, res: Response) => {
-  try {
-    const stats = getBotStats();
-
-    res.json({
-      success: true,
-      data: {
-        totalBots: stats.totalBots,
-        byTier: stats.byTier,
-        avgStarRating: stats.avgStarRating.toFixed(2),
-        avgApPoints: stats.avgApPoints.toFixed(0),
-      },
-    });
-  } catch (err: any) {
-    logger.error('Get stats error', { error: err.message });
-    res.status(500).json({ success: false, error: 'Failed to get stats' });
   }
 });
 
