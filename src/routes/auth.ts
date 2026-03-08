@@ -25,10 +25,13 @@ import {
   markPasswordResetTokenUsed,
   updateUserPassword,
   getUserSanction,
+  setEmailVerified,
+  createEmailVerificationToken,
+  getValidEmailVerificationToken,
 } from '../db/database';
 import { logger } from '../middleware/logger';
 import { authLimiter, passwordResetLimiter } from '../middleware/rateLimiter';
-import { sendPasswordResetEmail } from '../services/email';
+import { sendPasswordResetEmail, sendVerificationEmail } from '../services/email';
 
 const router = Router();
 
@@ -167,10 +170,14 @@ router.post('/register', authLimiter, async (req: Request, res: Response) => {
     const userId = uuid();
     createUser(userId, email, passwordHash, name);
 
-    // Generate JWT
+    // Generate JWT (user can log in but will see verification gate)
     const token = signToken(userId, email, 'standard');
 
-    logger.info('User registered', { userId, email });
+    // Send verification email
+    const verifyToken = createEmailVerificationToken(userId, email);
+    const emailSent = await sendVerificationEmail(email, verifyToken, name);
+
+    logger.info('User registered', { userId, email, verificationEmailSent: emailSent });
 
     res.status(201).json({
       success: true,
@@ -181,8 +188,10 @@ router.post('/register', authLimiter, async (req: Request, res: Response) => {
           email: email.toLowerCase().trim(),
           name: name.trim(),
           tier: 'standard',
+          emailVerified: false,
           createdAt: Date.now(),
         },
+        verificationEmailSent: emailSent,
       },
     });
   } catch (err: any) {
@@ -263,6 +272,7 @@ router.post('/login', authLimiter, async (req: Request, res: Response) => {
           name: user.name,
           tier: user.tier,
           role: user.role,
+          emailVerified: user.emailVerified,
           createdAt: user.createdAt,
           lastLoginAt: Date.now(),
         },
@@ -442,6 +452,104 @@ router.post('/reset-password', passwordResetLimiter, async (req: Request, res: R
   } catch (err: any) {
     logger.error('Reset password error', { error: err.message });
     res.status(500).json({ success: false, error: 'Password reset failed' });
+  }
+});
+
+// ─── POST /verify-email ─────────────────────────────────────────────────────
+// Validate email verification token and mark user as verified.
+
+router.post('/verify-email', async (req: Request, res: Response) => {
+  try {
+    const { token } = req.body;
+    if (!token || typeof token !== 'string') {
+      res.status(400).json({ success: false, error: 'Verification token is required' });
+      return;
+    }
+
+    const record = getValidEmailVerificationToken(token);
+    if (!record) {
+      res.status(400).json({
+        success: false,
+        error: 'Invalid or expired verification link. Please request a new one.',
+      });
+      return;
+    }
+
+    const user = getUserById(record.userId);
+    if (!user) {
+      res.status(400).json({ success: false, error: 'Account not found' });
+      return;
+    }
+
+    // Mark email as verified
+    setEmailVerified(user.id, true);
+
+    // Mark token as used (one-time)
+    markPasswordResetTokenUsed(record.id);
+
+    logger.info('Email verified', { userId: user.id, email: user.email });
+
+    // Issue a fresh JWT so the frontend can update immediately
+    const jwtToken = signToken(user.id, user.email, user.tier, user.role);
+
+    res.json({
+      success: true,
+      data: {
+        message: 'Email verified successfully',
+        token: jwtToken,
+        user: {
+          id: user.id,
+          email: user.email,
+          name: user.name,
+          tier: user.tier,
+          role: user.role,
+          emailVerified: true,
+        },
+      },
+    });
+  } catch (err: any) {
+    logger.error('Email verification error', { error: err.message });
+    res.status(500).json({ success: false, error: 'Email verification failed' });
+  }
+});
+
+// ─── POST /resend-verification ──────────────────────────────────────────────
+// Resend verification email — requires JWT auth.
+
+router.post('/resend-verification', requireAuth, async (req: Request, res: Response) => {
+  try {
+    const { sub: userId } = (req as any).user;
+    const user = getUserById(userId);
+
+    if (!user) {
+      res.status(404).json({ success: false, error: 'User not found' });
+      return;
+    }
+
+    if (user.emailVerified) {
+      res.json({ success: true, data: { message: 'Email is already verified' } });
+      return;
+    }
+
+    // Generate new verification token (invalidates any previous ones)
+    const verifyToken = createEmailVerificationToken(user.id, user.email);
+    const sent = await sendVerificationEmail(user.email, verifyToken, user.name);
+
+    if (!sent) {
+      logger.error('Failed to resend verification email', { userId: user.id, email: user.email });
+      res.status(500).json({ success: false, error: 'Failed to send verification email' });
+      return;
+    }
+
+    logger.info('Verification email resent', { userId: user.id, email: user.email });
+
+    res.json({
+      success: true,
+      data: { message: 'Verification email sent. Please check your inbox.' },
+    });
+  } catch (err: any) {
+    logger.error('Resend verification error', { error: err.message });
+    res.status(500).json({ success: false, error: 'Failed to resend verification email' });
   }
 });
 

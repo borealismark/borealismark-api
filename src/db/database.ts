@@ -982,6 +982,63 @@ export function deleteExpiredPasswordResetTokens(): number {
   return result.changes;
 }
 
+// ─── Email Verification Queries ──────────────────────────────────────────────
+
+/**
+ * Set a user's email_verified status.
+ */
+export function setEmailVerified(userId: string, verified: boolean): void {
+  getDb()
+    .prepare('UPDATE users SET email_verified = ? WHERE id = ?')
+    .run(verified ? 1 : 0, userId);
+}
+
+/**
+ * Create an email verification token. Returns the raw token (sent in the email link).
+ * Re-uses the password_reset_tokens table with a 'verify-email' prefix in the id.
+ */
+export function createEmailVerificationToken(userId: string, email: string): string {
+  const rawToken = randomBytes(32).toString('hex');
+  const tokenHash = createHash('sha256').update(rawToken).digest('hex');
+  const id = `ev-${uuidv4()}`;
+  const now = Date.now();
+  const expiresAt = now + 24 * 60 * 60 * 1000; // 24 hours
+
+  // Invalidate any existing unused verification tokens for this user
+  getDb()
+    .prepare("UPDATE password_reset_tokens SET used_at = ? WHERE user_id = ? AND used_at IS NULL AND id LIKE 'ev-%'")
+    .run(now, userId);
+
+  getDb()
+    .prepare(
+      'INSERT INTO password_reset_tokens (id, user_id, email, token_hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+    )
+    .run(id, userId, email.toLowerCase().trim(), tokenHash, expiresAt, now);
+
+  return rawToken;
+}
+
+/**
+ * Look up a verification token by its raw value.
+ * Returns null if not found, already used, or expired.
+ */
+export function getValidEmailVerificationToken(rawToken: string): PasswordResetTokenRecord | null {
+  const tokenHash = createHash('sha256').update(rawToken).digest('hex');
+  const row = getDb()
+    .prepare("SELECT * FROM password_reset_tokens WHERE token_hash = ? AND used_at IS NULL AND expires_at > ? AND id LIKE 'ev-%'")
+    .get(tokenHash, Date.now()) as Record<string, unknown> | undefined;
+  if (!row) return null;
+  return {
+    id: row.id as string,
+    userId: row.user_id as string,
+    email: row.email as string,
+    tokenHash: row.token_hash as string,
+    expiresAt: row.expires_at as number,
+    usedAt: row.used_at as number | null,
+    createdAt: row.created_at as number,
+  };
+}
+
 // ─── USDC Invoice Queries ────────────────────────────────────────────────────
 
 export interface UsdcInvoiceRecord {
