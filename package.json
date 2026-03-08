@@ -5,7 +5,7 @@
   "main": "dist/server.js",
   "scripts": {
     "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
-    "build": "rm -rf dist && tsc && mkdir -p dist/docs && cp src/docs/openapi.yaml dist/docs/",
+    "build": "rm -rf dist && npx tsc --outDir dist --rootDir src && ls dist/server.js && mkdir -p dist/docs && cp src/docs/openapi.yaml dist/docs/",
     "start": "node dist/server.js",
     "verify": "./node_modules/.bin/ts-node src/verify-certificate.ts",
     "test": "node --experimental-vm-modules node_modules/.bin/jest"
