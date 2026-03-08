@@ -10,7 +10,8 @@
 import { Resend } from 'resend';
 import { logger } from '../middleware/logger';
 
-const FROM_ADDRESS = 'BorealisMark <support@borealisprotocol.ai>';
+// Use custom domain if verified in Resend, otherwise fall back to Resend's test sender
+const FROM_ADDRESS = process.env.EMAIL_FROM ?? 'BorealisMark <onboarding@resend.dev>';
 
 let resend: Resend | null = null;
 
