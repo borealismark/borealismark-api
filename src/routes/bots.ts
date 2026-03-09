@@ -22,6 +22,7 @@ import { z } from 'zod';
 import { v4 as uuid } from 'uuid';
 import { requireAuth, type AuthRequest } from './auth';
 import { logger } from '../middleware/logger';
+import { events as eventBus } from '../services/eventBus';
 import { getUserById } from '../db/database';
 import {
   createBot,
@@ -208,6 +209,7 @@ router.post('/', requireAuth, async (req: Request, res: Response) => {
       name,
       tier: user.tier,
     });
+    eventBus.botRegistered(botId, userId, name);
 
     res.status(201).json({
       success: true,
@@ -721,6 +723,7 @@ router.post('/:id/rate', requireAuth, (req: Request, res: Response) => {
       newAvgRating: newAvgRating.toFixed(2),
       underReview,
     });
+    eventBus.botRated(id, userId, rating);
 
     res.json({
       success: true,

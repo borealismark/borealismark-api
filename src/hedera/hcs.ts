@@ -1,11 +1,10 @@
-import {
-  Client,
-  TopicCreateTransaction,
-  TopicMessageSubmitTransaction,
-  PrivateKey,
-  AccountId,
-  TopicId,
-} from '@hashgraph/sdk';
+/**
+ * BorealisMark — Hedera Consensus Service Module
+ *
+ * Lazy-loads @hashgraph/sdk to avoid blocking server startup (~20s import).
+ * All SDK classes are loaded on first use via loadSDK().
+ */
+
 import type { AuditCertificate, SlashEvent } from '../engine/types';
 
 // ─── Config ───────────────────────────────────────────────────────────────────
@@ -24,6 +23,17 @@ export interface HCSSubmitResult {
   consensusTimestamp: string;
 }
 
+// ─── Lazy SDK Loading ─────────────────────────────────────────────────────────
+
+let _sdk: any = null;
+
+async function loadSDK() {
+  if (_sdk) return _sdk;
+  const sdk = await import('@hashgraph/sdk');
+  _sdk = sdk;
+  return sdk;
+}
+
 // ─── Key Parsing ──────────────────────────────────────────────────────────────
 
 /**
@@ -35,7 +45,7 @@ export interface HCSSubmitResult {
  * Never use fromString() alone — it can mis-detect the algorithm and produce
  * a key that parses without error but fails INVALID_SIGNATURE on the network.
  */
-function parsePrivateKey(keyString: string, algorithm?: string): PrivateKey {
+function parsePrivateKey(PrivateKey: any, keyString: string, algorithm?: string) {
   // Strip 0x prefix if present (common in EVM-style key exports)
   const s = keyString.trim().replace(/^0x/, '');
   // DER prefix: 302e = ED25519, 3041 or 302a = ECDSA — format is unambiguous
@@ -52,13 +62,15 @@ function parsePrivateKey(keyString: string, algorithm?: string): PrivateKey {
 
 // ─── Client Factory ───────────────────────────────────────────────────────────
 
-export function createHederaClient(config: HCSConfig): Client {
+export async function createHederaClient(config: HCSConfig): Promise<any> {
+  const { Client, AccountId, PrivateKey } = await loadSDK();
+
   const client =
     config.network === 'mainnet' ? Client.forMainnet() : Client.forTestnet();
 
   client.setOperator(
     AccountId.fromString(config.accountId),
-    parsePrivateKey(config.privateKey),
+    parsePrivateKey(PrivateKey, config.privateKey),
   );
 
   return client;
@@ -71,7 +83,9 @@ export function createHederaClient(config: HCSConfig): Client {
  * This should be run once and the resulting topic ID stored in HEDERA_AUDIT_TOPIC_ID.
  * The topic has a submit key so only the BorealisMark operator can write to it.
  */
-export async function createAuditTopic(client: Client): Promise<string> {
+export async function createAuditTopic(client: any): Promise<string> {
+  const { TopicCreateTransaction } = await loadSDK();
+
   const operatorPublicKey = client.operatorPublicKey;
   if (!operatorPublicKey) {
     throw new Error('Hedera client has no operator key configured');
@@ -106,10 +120,12 @@ export async function createAuditTopic(client: Client): Promise<string> {
  * at a specific consensus timestamp.
  */
 export async function submitCertificateToHCS(
-  client: Client,
+  client: any,
   topicId: string,
   certificate: AuditCertificate,
 ): Promise<HCSSubmitResult> {
+  const { TopicMessageSubmitTransaction, TopicId } = await loadSDK();
+
   const message = JSON.stringify({
     protocol: 'BorealisMark/1.0',
     type: 'AUDIT_CERTIFICATE',
@@ -151,10 +167,12 @@ export async function submitCertificateToHCS(
  * redistributed — the enforcement proof.
  */
 export async function submitSlashEventToHCS(
-  client: Client,
+  client: any,
   topicId: string,
   slashEvent: SlashEvent,
 ): Promise<HCSSubmitResult> {
+  const { TopicMessageSubmitTransaction, TopicId } = await loadSDK();
+
   const message = JSON.stringify({
     protocol: 'BorealisMark/1.0',
     type: 'SLASH_EVENT',

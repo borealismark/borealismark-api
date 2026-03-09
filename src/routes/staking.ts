@@ -158,7 +158,7 @@ router.post('/slash', requireApiKey, requireScope('audit'), slashLimiter, valida
         executedAt: Date.now(),
       };
 
-      const hederaClient = createHederaClient({
+      const hederaClient = await createHederaClient({
         accountId,
         privateKey,
         network: (process.env.HEDERA_NETWORK as 'testnet' | 'mainnet') ?? 'testnet',

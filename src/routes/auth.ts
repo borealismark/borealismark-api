@@ -31,6 +31,7 @@ import {
 } from '../db/database';
 import { logger } from '../middleware/logger';
 import { authLimiter, passwordResetLimiter } from '../middleware/rateLimiter';
+import { events as eventBus } from '../services/eventBus';
 import { sendPasswordResetEmail, sendVerificationEmail } from '../services/email';
 
 const router = Router();
@@ -178,6 +179,7 @@ router.post('/register', authLimiter, async (req: Request, res: Response) => {
     const emailSent = await sendVerificationEmail(email, verifyToken, name);
 
     logger.info('User registered', { userId, email, verificationEmailSent: emailSent });
+    eventBus.userRegistered(userId, email);
 
     res.status(201).json({
       success: true,
@@ -258,6 +260,7 @@ router.post('/login', authLimiter, async (req: Request, res: Response) => {
     const token = signToken(user.id, user.email, user.tier, user.role);
 
     logger.info('User logged in', { userId: user.id, email, role: user.role });
+    eventBus.userLogin(user.id);
 
     // Include mute status in response if applicable
     const muted = sanction?.status === 'muted' && sanction.muted_until && sanction.muted_until > Date.now();

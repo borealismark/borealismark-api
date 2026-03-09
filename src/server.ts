@@ -22,7 +22,11 @@ import imageProxyRouter from './routes/imageProxy';
 import botsRouter from './routes/bots';
 import supportRouter from './routes/support';
 import analyticsRouter from './routes/analytics';
+import adminRouter from './routes/admin';
 import { cleanupExpiredInvoices } from './hedera/usdc';
+import { startAggregationSchedule } from './services/dataStore';
+import { startAnchoringSchedule } from './services/hederaAnchor';
+import { events as eventBus } from './services/eventBus';
 import {
   getExpiredUsdcSubscriptions, getAllExpiredSubscriptions, getExpiringSubscriptions,
   updateUserTier, getExpiredSanctions, upsertUserSanction,
@@ -105,6 +109,7 @@ app.use('/v1/images',   imageProxyRouter);
 app.use('/v1/bots',     botsRouter);
 app.use('/v1/support',  supportRouter);
 app.use('/v1/analytics', analyticsRouter);
+app.use('/v1/admin',     adminRouter);
 
 // ─── Static Files (Dashboard) ────────────────────────────────────────────────
 
@@ -143,7 +148,7 @@ app.get('/health', (_req, res) => {
   res.json({
     status: 'ok',
     service: 'BorealisMark Protocol API',
-    version: '1.3.0',
+    version: '1.4.0',
     timestamp: Date.now(),
   });
 });
@@ -157,7 +162,7 @@ app.use((_req, res) => {
     available: [
       '/v1/auth', '/v1/agents', '/v1/staking', '/v1/network', '/v1/marks',
       '/v1/keys', '/v1/webhooks', '/v1/payments', '/v1/terminal', '/v1/marketplace',
-      '/v1/usage', '/v1/docs', '/v1/bots', '/v1/support', '/v1/analytics', '/health',
+      '/v1/usage', '/v1/docs', '/v1/bots', '/v1/support', '/v1/analytics', '/v1/admin', '/health',
     ],
     timestamp: Date.now(),
   });
@@ -404,6 +409,13 @@ app.listen(PORT, () => {
     network: process.env.HEDERA_NETWORK ?? 'testnet',
     hcsConfigured: !!process.env.HEDERA_AUDIT_TOPIC_ID,
   });
+
+  // Start data infrastructure
+  startAggregationSchedule();
+  startAnchoringSchedule();
+
+  // Emit system startup event
+  eventBus.systemError('startup', 'API started successfully'); // reusing as system event
 
   if (process.env.NODE_ENV !== 'production') {
     console.log(`

@@ -339,7 +339,7 @@ export async function anchorPaymentReceiptOnHCS(
       return null;
     }
 
-    const client = createHederaClient(config);
+    const client = await createHederaClient(config);
 
     const { TopicMessageSubmitTransaction, TopicId } = await import('@hashgraph/sdk');
 

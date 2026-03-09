@@ -12,7 +12,15 @@
  */
 
 import Anthropic from '@anthropic-ai/sdk';
+import { v4 as uuid } from 'uuid';
 import { logger } from '../middleware/logger';
+import {
+  upsertSupportThread,
+  addSupportMessage,
+  getSupportThreadBySessionId,
+  escalateSupportThread,
+} from '../db/database';
+import { events as eventBus } from './eventBus';
 
 // ─── Knowledge Base ──────────────────────────────────────────────────────────
 
@@ -419,6 +427,30 @@ export async function handleSupportChat(req: ChatRequest): Promise<ChatResponse>
     conversationCache.set(req.sessionId, convo);
   }
 
+  // Ensure support thread exists in DB
+  let thread = getSupportThreadBySessionId(req.sessionId);
+  if (!thread) {
+    const threadId = uuid();
+    upsertSupportThread({
+      id: threadId,
+      sessionId: req.sessionId,
+      channel: req.context === 'email' ? 'email' : 'chat',
+      customerEmail: req.userEmail,
+      customerName: req.userName,
+      subject: req.context === 'email' ? req.message.split('\n')[0]?.replace('Subject: ', '').slice(0, 200) : undefined,
+    });
+    thread = { id: threadId };
+    eventBus.supportThreadCreated(threadId, req.context === 'email' ? 'email' : 'chat', req.userEmail);
+  }
+
+  // Persist user message to DB
+  addSupportMessage({
+    id: uuid(),
+    threadId: thread.id,
+    role: 'user',
+    content: req.message,
+  });
+
   // Add user message
   convo.messages.push({ role: 'user', content: req.message });
   convo.lastActivity = Date.now();
@@ -483,6 +515,21 @@ export async function handleSupportChat(req: ChatRequest): Promise<ChatResponse>
 
     // Store assistant reply (cleaned)
     convo.messages.push({ role: 'assistant', content: reply });
+
+    // Persist assistant message to DB
+    addSupportMessage({
+      id: uuid(),
+      threadId: thread.id,
+      role: 'assistant',
+      content: reply,
+      tokensUsed: response.usage.input_tokens + response.usage.output_tokens,
+    });
+
+    // If escalated, mark thread
+    if (needsEscalation && thread.id) {
+      escalateSupportThread(thread.id, 'business_inquiry');
+      eventBus.supportEscalated(thread.id, 'business_inquiry');
+    }
 
     logger.info('AI support response generated', {
       sessionId: req.sessionId,

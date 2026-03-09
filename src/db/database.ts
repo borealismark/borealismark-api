@@ -464,6 +464,84 @@ function initSchema(db: Database.Database): void {
 
     CREATE INDEX IF NOT EXISTS idx_dead_letters_webhook ON webhook_dead_letters(webhook_id);
     CREATE INDEX IF NOT EXISTS idx_dead_letters_resolved ON webhook_dead_letters(resolved_at);
+
+    -- ── Support Threads (Aurora AI conversations) ──────────────────────────────
+    CREATE TABLE IF NOT EXISTS support_threads (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL UNIQUE,
+      channel TEXT NOT NULL DEFAULT 'chat',
+      customer_email TEXT,
+      customer_name TEXT,
+      subject TEXT,
+      status TEXT NOT NULL DEFAULT 'open',
+      escalated INTEGER NOT NULL DEFAULT 0,
+      escalation_reason TEXT,
+      assigned_to TEXT,
+      message_count INTEGER NOT NULL DEFAULT 0,
+      first_message_at INTEGER NOT NULL,
+      last_message_at INTEGER NOT NULL,
+      resolved_at INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_support_threads_session ON support_threads(session_id);
+    CREATE INDEX IF NOT EXISTS idx_support_threads_status ON support_threads(status);
+    CREATE INDEX IF NOT EXISTS idx_support_threads_email ON support_threads(customer_email);
+    CREATE INDEX IF NOT EXISTS idx_support_threads_escalated ON support_threads(escalated);
+    CREATE INDEX IF NOT EXISTS idx_support_threads_updated ON support_threads(updated_at DESC);
+
+    -- ── Support Messages (individual messages in threads) ──────────────────────
+    CREATE TABLE IF NOT EXISTS support_messages (
+      id TEXT PRIMARY KEY,
+      thread_id TEXT NOT NULL,
+      role TEXT NOT NULL,
+      content TEXT NOT NULL,
+      tokens_used INTEGER DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (thread_id) REFERENCES support_threads(id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_support_messages_thread ON support_messages(thread_id, created_at);
+
+    -- ── Platform Events (data collection infrastructure) ────────────────────────
+    CREATE TABLE IF NOT EXISTS platform_events (
+      id TEXT PRIMARY KEY,
+      event_type TEXT NOT NULL,
+      category TEXT NOT NULL,
+      actor_id TEXT,
+      actor_type TEXT NOT NULL DEFAULT 'system',
+      target_id TEXT,
+      target_type TEXT,
+      payload TEXT NOT NULL DEFAULT '{}',
+      metadata TEXT NOT NULL DEFAULT '{}',
+      anchored INTEGER NOT NULL DEFAULT 0,
+      anchor_tx_id TEXT,
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_events_type ON platform_events(event_type);
+    CREATE INDEX IF NOT EXISTS idx_events_category ON platform_events(category);
+    CREATE INDEX IF NOT EXISTS idx_events_actor ON platform_events(actor_id);
+    CREATE INDEX IF NOT EXISTS idx_events_target ON platform_events(target_id);
+    CREATE INDEX IF NOT EXISTS idx_events_created ON platform_events(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_events_anchored ON platform_events(anchored);
+
+    -- ── Data Aggregates (pre-computed metrics) ──────────────────────────────────
+    CREATE TABLE IF NOT EXISTS data_aggregates (
+      id TEXT PRIMARY KEY,
+      metric_key TEXT NOT NULL,
+      period TEXT NOT NULL,
+      period_start INTEGER NOT NULL,
+      value REAL NOT NULL DEFAULT 0,
+      metadata TEXT NOT NULL DEFAULT '{}',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      UNIQUE(metric_key, period, period_start)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_aggregates_key ON data_aggregates(metric_key, period);
+    CREATE INDEX IF NOT EXISTS idx_aggregates_period ON data_aggregates(period_start);
   `);
 
   // Migrate: add subscription tracking columns to users table
@@ -2918,4 +2996,254 @@ export function getBotReviews(botId: string): Record<string, any>[] {
   return getDb().prepare(`
     SELECT * FROM bot_reviews WHERE bot_id = ? ORDER BY created_at DESC
   `).all(botId) as Record<string, any>[];
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SUPPORT THREAD & MESSAGE PERSISTENCE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export function upsertSupportThread(thread: {
+  id: string;
+  sessionId: string;
+  channel: 'chat' | 'email';
+  customerEmail?: string;
+  customerName?: string;
+  subject?: string;
+}): void {
+  const now = Date.now();
+  getDb().prepare(`
+    INSERT INTO support_threads (id, session_id, channel, customer_email, customer_name, subject, status, message_count, first_message_at, last_message_at, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, 'open', 0, ?, ?, ?, ?)
+    ON CONFLICT(session_id) DO UPDATE SET
+      last_message_at = excluded.last_message_at,
+      updated_at = excluded.updated_at,
+      customer_email = COALESCE(excluded.customer_email, support_threads.customer_email),
+      customer_name = COALESCE(excluded.customer_name, support_threads.customer_name),
+      subject = COALESCE(excluded.subject, support_threads.subject)
+  `).run(thread.id, thread.sessionId, thread.channel, thread.customerEmail ?? null, thread.customerName ?? null, thread.subject ?? null, now, now, now, now);
+}
+
+export function addSupportMessage(msg: {
+  id: string;
+  threadId: string;
+  role: 'user' | 'assistant';
+  content: string;
+  tokensUsed?: number;
+}): void {
+  const now = Date.now();
+  getDb().prepare(`
+    INSERT INTO support_messages (id, thread_id, role, content, tokens_used, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(msg.id, msg.threadId, msg.role, msg.content, msg.tokensUsed ?? 0, now);
+
+  // Update thread counters
+  getDb().prepare(`
+    UPDATE support_threads SET message_count = message_count + 1, last_message_at = ?, updated_at = ? WHERE id = ?
+  `).run(now, now, msg.threadId);
+}
+
+export function getSupportThreadBySessionId(sessionId: string): Record<string, any> | null {
+  return getDb().prepare('SELECT * FROM support_threads WHERE session_id = ?').get(sessionId) as Record<string, any> | null;
+}
+
+export function getSupportThreads(opts: {
+  status?: string;
+  channel?: string;
+  escalated?: boolean;
+  limit?: number;
+  offset?: number;
+}): { threads: Record<string, any>[]; total: number } {
+  let where = 'WHERE 1=1';
+  const params: any[] = [];
+  if (opts.status) { where += ' AND status = ?'; params.push(opts.status); }
+  if (opts.channel) { where += ' AND channel = ?'; params.push(opts.channel); }
+  if (opts.escalated !== undefined) { where += ' AND escalated = ?'; params.push(opts.escalated ? 1 : 0); }
+
+  const total = (getDb().prepare(`SELECT COUNT(*) as cnt FROM support_threads ${where}`).get(...params) as any).cnt;
+  const limit = opts.limit ?? 50;
+  const offset = opts.offset ?? 0;
+  const threads = getDb().prepare(`SELECT * FROM support_threads ${where} ORDER BY updated_at DESC LIMIT ? OFFSET ?`).all(...params, limit, offset) as Record<string, any>[];
+  return { threads, total };
+}
+
+export function getSupportMessages(threadId: string): Record<string, any>[] {
+  return getDb().prepare('SELECT * FROM support_messages WHERE thread_id = ? ORDER BY created_at ASC').all(threadId) as Record<string, any>[];
+}
+
+export function updateSupportThreadStatus(threadId: string, status: string, resolvedAt?: number): void {
+  const now = Date.now();
+  if (status === 'resolved') {
+    getDb().prepare('UPDATE support_threads SET status = ?, resolved_at = ?, updated_at = ? WHERE id = ?').run(status, resolvedAt ?? now, now, threadId);
+  } else {
+    getDb().prepare('UPDATE support_threads SET status = ?, updated_at = ? WHERE id = ?').run(status, now, threadId);
+  }
+}
+
+export function escalateSupportThread(threadId: string, reason: string): void {
+  const now = Date.now();
+  getDb().prepare('UPDATE support_threads SET escalated = 1, escalation_reason = ?, status = ?, updated_at = ? WHERE id = ?').run(reason, 'escalated', now, threadId);
+}
+
+export function assignSupportThread(threadId: string, adminId: string): void {
+  const now = Date.now();
+  getDb().prepare('UPDATE support_threads SET assigned_to = ?, updated_at = ? WHERE id = ?').run(adminId, now, threadId);
+}
+
+export function getSupportStats(): Record<string, any> {
+  const db = getDb();
+  const total = (db.prepare('SELECT COUNT(*) as cnt FROM support_threads').get() as any).cnt;
+  const open = (db.prepare("SELECT COUNT(*) as cnt FROM support_threads WHERE status = 'open'").get() as any).cnt;
+  const escalated = (db.prepare("SELECT COUNT(*) as cnt FROM support_threads WHERE escalated = 1 AND status != 'resolved'").get() as any).cnt;
+  const resolved = (db.prepare("SELECT COUNT(*) as cnt FROM support_threads WHERE status = 'resolved'").get() as any).cnt;
+  const totalMessages = (db.prepare('SELECT COUNT(*) as cnt FROM support_messages').get() as any).cnt;
+  const avgMessagesPerThread = total > 0 ? Math.round(totalMessages / total * 10) / 10 : 0;
+
+  // Last 24h activity
+  const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
+  const newToday = (db.prepare('SELECT COUNT(*) as cnt FROM support_threads WHERE created_at > ?').get(dayAgo) as any).cnt;
+  const resolvedToday = (db.prepare('SELECT COUNT(*) as cnt FROM support_threads WHERE resolved_at > ?').get(dayAgo) as any).cnt;
+
+  return { total, open, escalated, resolved, totalMessages, avgMessagesPerThread, newToday, resolvedToday };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PLATFORM EVENTS (DATA COLLECTION)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export function insertPlatformEvent(event: {
+  id: string;
+  eventType: string;
+  category: string;
+  actorId?: string;
+  actorType?: string;
+  targetId?: string;
+  targetType?: string;
+  payload?: Record<string, any>;
+  metadata?: Record<string, any>;
+}): void {
+  getDb().prepare(`
+    INSERT INTO platform_events (id, event_type, category, actor_id, actor_type, target_id, target_type, payload, metadata, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    event.id, event.eventType, event.category,
+    event.actorId ?? null, event.actorType ?? 'system',
+    event.targetId ?? null, event.targetType ?? null,
+    JSON.stringify(event.payload ?? {}),
+    JSON.stringify(event.metadata ?? {}),
+    Date.now(),
+  );
+}
+
+export function getUnanchoredEvents(limit: number = 100): Record<string, any>[] {
+  return getDb().prepare('SELECT * FROM platform_events WHERE anchored = 0 ORDER BY created_at ASC LIMIT ?').all(limit) as Record<string, any>[];
+}
+
+export function markEventsAnchored(eventIds: string[], txId: string): void {
+  const db = getDb();
+  const stmt = db.prepare('UPDATE platform_events SET anchored = 1, anchor_tx_id = ? WHERE id = ?');
+  const batchUpdate = db.transaction((ids: string[]) => {
+    for (const id of ids) stmt.run(txId, id);
+  });
+  batchUpdate(eventIds);
+}
+
+export function getPlatformEvents(opts: {
+  category?: string;
+  eventType?: string;
+  actorId?: string;
+  since?: number;
+  limit?: number;
+  offset?: number;
+}): { events: Record<string, any>[]; total: number } {
+  let where = 'WHERE 1=1';
+  const params: any[] = [];
+  if (opts.category) { where += ' AND category = ?'; params.push(opts.category); }
+  if (opts.eventType) { where += ' AND event_type = ?'; params.push(opts.eventType); }
+  if (opts.actorId) { where += ' AND actor_id = ?'; params.push(opts.actorId); }
+  if (opts.since) { where += ' AND created_at > ?'; params.push(opts.since); }
+
+  const total = (getDb().prepare(`SELECT COUNT(*) as cnt FROM platform_events ${where}`).get(...params) as any).cnt;
+  const limit = opts.limit ?? 100;
+  const offset = opts.offset ?? 0;
+  const events = getDb().prepare(`SELECT * FROM platform_events ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`).all(...params, limit, offset) as Record<string, any>[];
+  return { events, total };
+}
+
+export function getEventStats(since?: number): Record<string, any> {
+  const db = getDb();
+  const cutoff = since ?? Date.now() - 24 * 60 * 60 * 1000;
+  const total = (db.prepare('SELECT COUNT(*) as cnt FROM platform_events WHERE created_at > ?').get(cutoff) as any).cnt;
+  const byCategory = db.prepare('SELECT category, COUNT(*) as cnt FROM platform_events WHERE created_at > ? GROUP BY category ORDER BY cnt DESC').all(cutoff) as any[];
+  const byType = db.prepare('SELECT event_type, COUNT(*) as cnt FROM platform_events WHERE created_at > ? GROUP BY event_type ORDER BY cnt DESC LIMIT 20').all(cutoff) as any[];
+  const anchored = (db.prepare('SELECT COUNT(*) as cnt FROM platform_events WHERE anchored = 1 AND created_at > ?').get(cutoff) as any).cnt;
+  return { total, anchored, unanchored: total - anchored, byCategory, byType };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DATA AGGREGATES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export function upsertAggregate(metricKey: string, period: string, periodStart: number, value: number, metadata?: Record<string, any>): void {
+  const now = Date.now();
+  const id = `${metricKey}:${period}:${periodStart}`;
+  getDb().prepare(`
+    INSERT INTO data_aggregates (id, metric_key, period, period_start, value, metadata, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(metric_key, period, period_start) DO UPDATE SET
+      value = excluded.value,
+      metadata = excluded.metadata,
+      updated_at = excluded.updated_at
+  `).run(id, metricKey, period, periodStart, value, JSON.stringify(metadata ?? {}), now, now);
+}
+
+export function getAggregates(metricKey: string, period: string, since: number, until?: number): Record<string, any>[] {
+  const end = until ?? Date.now();
+  return getDb().prepare('SELECT * FROM data_aggregates WHERE metric_key = ? AND period = ? AND period_start >= ? AND period_start <= ? ORDER BY period_start ASC').all(metricKey, period, since, end) as Record<string, any>[];
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ADMIN HELPERS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export function getAllUsers(opts: { limit?: number; offset?: number; tier?: string; role?: string; search?: string }): { users: UserRecord[]; total: number } {
+  let where = 'WHERE 1=1';
+  const params: any[] = [];
+  if (opts.tier) { where += ' AND tier = ?'; params.push(opts.tier); }
+  if (opts.role) { where += ' AND role = ?'; params.push(opts.role); }
+  if (opts.search) { where += ' AND (email LIKE ? OR name LIKE ?)'; params.push(`%${opts.search}%`, `%${opts.search}%`); }
+
+  const total = (getDb().prepare(`SELECT COUNT(*) as cnt FROM users ${where}`).get(...params) as any).cnt;
+  const limit = opts.limit ?? 50;
+  const offset = opts.offset ?? 0;
+  const users = getDb().prepare(`SELECT id, email, name, tier, role, created_at, last_login_at, email_verified, active, stripe_customer_id, subscription_expires_at, subscription_method, subscription_plan_id FROM users ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`).all(...params, limit, offset) as UserRecord[];
+  return { users, total };
+}
+
+export function getAdminDashboardStats(): Record<string, any> {
+  const db = getDb();
+  const totalUsers = (db.prepare('SELECT COUNT(*) as cnt FROM users').get() as any).cnt;
+  const activeUsers = (db.prepare('SELECT COUNT(*) as cnt FROM users WHERE active = 1').get() as any).cnt;
+  const proUsers = (db.prepare("SELECT COUNT(*) as cnt FROM users WHERE tier = 'pro'").get() as any).cnt;
+  const eliteUsers = (db.prepare("SELECT COUNT(*) as cnt FROM users WHERE tier = 'elite'").get() as any).cnt;
+  const totalBots = (db.prepare('SELECT COUNT(*) as cnt FROM bots').get() as any).cnt;
+  const activeBots = (db.prepare("SELECT COUNT(*) as cnt FROM bots WHERE status = 'active'").get() as any).cnt;
+  const totalListings = (db.prepare('SELECT COUNT(*) as cnt FROM marketplace_listings').get() as any).cnt;
+  const publishedListings = (db.prepare("SELECT COUNT(*) as cnt FROM marketplace_listings WHERE status = 'published'").get() as any).cnt;
+  const totalOrders = (db.prepare('SELECT COUNT(*) as cnt FROM marketplace_orders').get() as any).cnt;
+  const totalAgents = (db.prepare('SELECT COUNT(*) as cnt FROM agents WHERE active = 1').get() as any).cnt;
+  const totalCertificates = (db.prepare('SELECT COUNT(*) as cnt FROM audit_certificates WHERE revoked = 0').get() as any).cnt;
+
+  // Revenue (settled orders)
+  const revenue = db.prepare("SELECT COALESCE(SUM(total_usdc), 0) as total FROM marketplace_orders WHERE status = 'settled'").get() as any;
+
+  // Last 7 days signups
+  const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  const newUsersWeek = (db.prepare('SELECT COUNT(*) as cnt FROM users WHERE created_at > ?').get(weekAgo) as any).cnt;
+
+  return {
+    users: { total: totalUsers, active: activeUsers, pro: proUsers, elite: eliteUsers, newThisWeek: newUsersWeek },
+    bots: { total: totalBots, active: activeBots },
+    marketplace: { listings: totalListings, published: publishedListings, orders: totalOrders, revenueUsdc: revenue.total },
+    protocol: { agents: totalAgents, certificates: totalCertificates },
+  };
 }

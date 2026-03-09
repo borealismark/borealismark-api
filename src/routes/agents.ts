@@ -185,7 +185,7 @@ router.post('/audit', requireApiKey, requireScope('audit'), auditLimiter, valida
 
     if (accountId && privateKey) {
       try {
-        const hederaClient = createHederaClient({
+        const hederaClient = await createHederaClient({
           accountId,
           privateKey,
           network: (process.env.HEDERA_NETWORK as 'testnet' | 'mainnet') ?? 'testnet',
@@ -611,7 +611,7 @@ router.post('/my/:id/audit', requireAuth, auditLimiter, async (req, res) => {
 
     if (accountId && privateKey) {
       try {
-        const hederaClient = createHederaClient({ accountId, privateKey, network: (process.env.HEDERA_NETWORK as 'testnet' | 'mainnet') ?? 'testnet' });
+        const hederaClient = await createHederaClient({ accountId, privateKey, network: (process.env.HEDERA_NETWORK as 'testnet' | 'mainnet') ?? 'testnet' });
         if (!topicId) topicId = await createAuditTopic(hederaClient);
         const hcsResult = await submitCertificateToHCS(hederaClient, topicId, certificate);
         updateCertificateHCS(certificate.auditId, hcsResult.topicId, hcsResult.transactionId, hcsResult.sequenceNumber, hcsResult.consensusTimestamp);
