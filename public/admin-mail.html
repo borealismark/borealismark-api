@@ -40,8 +40,18 @@ body{font-family:'Inter',system-ui,-apple-system,sans-serif;background:var(--bg)
 .auth-card input{width:100%;background:var(--bg-input);border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px 16px;color:var(--text-primary);font-size:14px;margin-bottom:12px;outline:none;transition:border-color .15s}
 .auth-card input:focus{border-color:var(--gold)}
 .auth-card input::placeholder{color:var(--text-faint)}
-.auth-card button{width:100%;background:var(--gold);color:var(--bg);border:none;border-radius:var(--radius-sm);padding:12px;font-weight:600;font-size:14px;cursor:pointer;transition:background .15s;margin-top:8px}
-.auth-card button:hover{background:var(--gold-bright)}
+.pw-wrapper{position:relative;width:100%;margin-bottom:12px}
+.pw-wrapper input{margin-bottom:0;padding-right:44px}
+.pw-toggle{position:absolute;right:12px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--text-faint);cursor:pointer;padding:4px;display:flex;align-items:center;transition:color .15s}
+.pw-toggle:hover{color:var(--text-secondary)}
+.remember-row{display:flex;align-items:center;gap:8px;margin-bottom:16px;justify-content:flex-start}
+.remember-row input[type="checkbox"]{width:14px;height:14px;accent-color:var(--gold);cursor:pointer;margin:0}
+.remember-row label{font-size:12px;color:var(--text-muted);cursor:pointer;user-select:none}
+.auth-card .auth-btn{width:100%;background:var(--gold);color:var(--bg);border:none;border-radius:var(--radius-sm);padding:12px;font-weight:600;font-size:14px;cursor:pointer;transition:background .15s;margin-top:4px}
+.auth-card .auth-btn:hover{background:var(--gold-bright)}
+.auth-card .back-link{display:inline-flex;align-items:center;gap:6px;margin-top:20px;color:var(--text-faint);font-size:12px;text-decoration:none;transition:color .15s}
+.auth-card .back-link:hover{color:var(--text-secondary)}
+.auth-card .back-link svg{width:14px;height:14px}
 .auth-card .error{color:var(--red);font-size:12px;margin-top:12px;display:none}
 
 /* ─── App Layout ─── */
@@ -197,9 +207,23 @@ body{font-family:'Inter',system-ui,-apple-system,sans-serif;background:var(--bg)
     <div class="logo"><span>Borealis</span><span>Mark</span></div>
     <div class="subtitle">Admin Mail Center</div>
     <input type="email" id="auth-email" placeholder="Admin email" autocomplete="email">
-    <input type="password" id="auth-password" placeholder="Password" autocomplete="current-password">
-    <button onclick="doLogin()">Sign In</button>
+    <div class="pw-wrapper">
+      <input type="password" id="auth-password" placeholder="Password" autocomplete="current-password">
+      <button type="button" class="pw-toggle" onclick="togglePwVisibility()" aria-label="Toggle password visibility">
+        <svg id="eye-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+        <svg id="eye-off-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" style="display:none"><path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19m-6.72-1.07a3 3 0 11-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+      </button>
+    </div>
+    <div class="remember-row">
+      <input type="checkbox" id="auth-remember">
+      <label for="auth-remember">Remember me</label>
+    </div>
+    <button class="auth-btn" onclick="doLogin()">Sign In</button>
     <div class="error" id="auth-error"></div>
+    <a href="https://borealisterminal.com" class="back-link">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12,19 5,12 12,5"/></svg>
+      Back to Borealis Terminal
+    </a>
   </div>
 </div>
 
@@ -327,6 +351,29 @@ const LIMIT = 50;
 
 // ─── Auth ───────────────────────────────────────────────────────────────────
 
+function togglePwVisibility() {
+  const inp = document.getElementById('auth-password');
+  const eyeOn = document.getElementById('eye-icon');
+  const eyeOff = document.getElementById('eye-off-icon');
+  if (inp.type === 'password') {
+    inp.type = 'text'; eyeOn.style.display = 'none'; eyeOff.style.display = 'block';
+  } else {
+    inp.type = 'password'; eyeOn.style.display = 'block'; eyeOff.style.display = 'none';
+  }
+}
+
+function saveToken(t) {
+  const remember = document.getElementById('auth-remember').checked;
+  if (remember) { localStorage.setItem('bm_admin_token', t); }
+  sessionStorage.setItem('bm_admin_token', t);
+}
+
+function clearToken() {
+  token = '';
+  sessionStorage.removeItem('bm_admin_token');
+  localStorage.removeItem('bm_admin_token');
+}
+
 async function doLogin() {
   const email = document.getElementById('auth-email').value.trim();
   const pass = document.getElementById('auth-password').value;
@@ -352,7 +399,7 @@ async function doLogin() {
     const me = await apiFetch('/v1/admin/mail/stats');
     if (!me.success) { errEl.textContent = 'Admin access required'; errEl.style.display = 'block'; token = ''; return; }
 
-    sessionStorage.setItem('bm_admin_token', token);
+    saveToken(token);
     document.getElementById('auth-gate').style.display = 'none';
     document.getElementById('app').style.display = 'block';
     init();
@@ -361,20 +408,21 @@ async function doLogin() {
   }
 }
 
-// Auto-login from session
+// Auto-login from session or remembered token
 (function() {
-  const saved = sessionStorage.getItem('bm_admin_token');
+  const saved = sessionStorage.getItem('bm_admin_token') || localStorage.getItem('bm_admin_token');
   if (saved) {
     token = saved;
     fetch(`${API}/v1/admin/mail/stats`, { headers: { 'Authorization': `Bearer ${token}` } })
       .then(r => r.json())
       .then(data => {
         if (data.success) {
+          sessionStorage.setItem('bm_admin_token', token);
           document.getElementById('auth-gate').style.display = 'none';
           document.getElementById('app').style.display = 'block';
           init();
-        } else { token = ''; sessionStorage.removeItem('bm_admin_token'); }
-      }).catch(() => { token = ''; sessionStorage.removeItem('bm_admin_token'); });
+        } else { clearToken(); }
+      }).catch(() => { clearToken(); });
   }
 })();
 
