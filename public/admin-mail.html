@@ -313,7 +313,9 @@ body{font-family:'Inter',system-ui,-apple-system,sans-serif;background:var(--bg)
 <div class="toast" id="toast"></div>
 
 <script>
-const API = window.location.origin;
+const API = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+  ? window.location.origin
+  : 'https://borealismark-api.onrender.com';
 let token = '';
 let currentFolder = 'inbox';
 let currentSearch = '';
