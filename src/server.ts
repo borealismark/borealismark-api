@@ -7,7 +7,7 @@ import { requestLogger, logger } from './middleware/logger';
 import { globalLimiter } from './middleware/rateLimiter';
 import authRouter from './routes/auth';
 import agentsRouter from './routes/agents';
-import stakingRouter from './routes/staking';
+import trustRouter from './routes/trust';
 import networkRouter from './routes/network';
 import marksRouter from './routes/marks';
 import keysRouter from './routes/keys';
@@ -156,7 +156,7 @@ app.use(express.json({ limit: '2mb' }));
 
 app.use('/v1/auth',     authRouter);
 app.use('/v1/agents',   agentsRouter);
-app.use('/v1/staking',  stakingRouter);
+app.use('/v1/trust',    trustRouter);
 app.use('/v1/network',  networkRouter);
 app.use('/v1/marks',    marksRouter);
 app.use('/v1/keys',     keysRouter);
@@ -239,7 +239,7 @@ app.use((_req, res) => {
     success: false,
     error: 'Endpoint not found',
     available: [
-      '/v1/auth', '/v1/agents', '/v1/staking', '/v1/network', '/v1/marks',
+      '/v1/auth', '/v1/agents', '/v1/trust', '/v1/network', '/v1/marks',
       '/v1/keys', '/v1/webhooks', '/v1/payments', '/v1/terminal', '/v1/marketplace',
       '/v1/usage', '/v1/docs', '/v1/bots', '/v1/support', '/v1/analytics', '/v1/admin', '/v1/admin/mail', '/health',
     ],
@@ -538,8 +538,8 @@ app.listen(PORT, () => {
 ║    POST /v1/agents/audit          Run cryptographic audit║
 ║    GET  /v1/agents/:id/score      Retrieve score         ║
 ║    GET  /v1/agents/:id/certificate Full certificate      ║
-║    POST /v1/staking/allocate      Stake BMT              ║
-║    POST /v1/staking/slash         Execute slashing       ║
+║    POST /v1/trust/deposit         Create trust deposit   ║
+║    POST /v1/trust/penalize        Execute penalty        ║
 ║    GET  /v1/network/consensus     Network stats          ║
 ║    GET  /v1/marks/global          Global mark registry   ║
 ║    POST /v1/keys                  Create API key [admin] ║

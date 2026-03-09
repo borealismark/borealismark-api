@@ -109,10 +109,11 @@ export const webhookLimiter = rateLimit({
   },
 });
 
-// ─── Slash Limiter ────────────────────────────────────────────────────────────
-// Slashing executes real BMT transfers. Extreme conservatism: 2 per hour per API key.
+// ─── Penalty Limiter ─────────────────────────────────────────────────────────
+// Penalty forfeiture is irreversible. Extreme conservatism: 2 per hour per API key.
 
-export const slashLimiter = rateLimit({
+export { penaltyLimiter as slashLimiter }; // backward compat
+export const penaltyLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 2,
   standardHeaders: true,

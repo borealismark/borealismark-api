@@ -53,7 +53,7 @@ export function validateHederaConfig(): HealthCheckResult {
     if (keyLength < 64) {
       errors.push(`HEDERA_PRIVATE_KEY format invalid: too short (${keyLength} chars, expected 64+ for hex or DER-encoded)`);
     } else {
-      logger.info('✓ HEDERA_PRIVATE_KEY configured (length: %d)', keyLength);
+      logger.info('✓ HEDERA_PRIVATE_KEY configured (length: ' + keyLength + ')');
     }
   }
 

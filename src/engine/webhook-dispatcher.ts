@@ -11,13 +11,17 @@ import { logger } from '../middleware/logger';
 export const WEBHOOK_EVENTS = [
   'audit.completed',     // New certificate issued
   'audit.anchored',      // Certificate confirmed on Hedera HCS
+  'audit.requested',     // New audit requested
+  'audit.rejected',      // Audit request rejected
   'score.degraded',      // Agent score dropped by ≥ 50 points
   'score.improved',      // Agent score improved by ≥ 50 points
-  'stake.allocated',     // New BMT stake registered
-  'slash.executed',      // Slashing event completed
+  'trust.deposited',     // New USDC trust deposit registered
+  'penalty.executed',    // Trust deposit penalty executed
   'agent.registered',    // New agent registered
   'key.revoked',         // API key was revoked
   'webhook.test',        // Test ping
+  'stake.allocated',     // DEPRECATED: use trust.deposited
+  'slash.executed',      // DEPRECATED: use penalty.executed
 ] as const;
 
 export type WebhookEvent = typeof WEBHOOK_EVENTS[number];
@@ -248,6 +252,18 @@ export const emit = {
     hcsConsensusTimestamp: string;
   }) => dispatch('audit.anchored', data),
 
+  auditRequested: (data: {
+    auditRequestId: string;
+    agentId: string;
+    requesterKeyId: string;
+  }) => dispatch('audit.requested', data),
+
+  auditRejected: (data: {
+    auditRequestId: string;
+    agentId: string;
+    reason: string;
+  }) => dispatch('audit.rejected', data),
+
   scoreDegraded: (data: {
     agentId: string;
     previousScore: number;
@@ -266,6 +282,28 @@ export const emit = {
     delta: number;
   }) => dispatch('score.improved', data),
 
+  trustDeposited: (data: {
+    agentId: string;
+    depositId: string;
+    usdcAmount: number;
+    tier: string;
+  }) => dispatch('trust.deposited', data),
+
+  penaltyExecuted: (data: {
+    agentId: string;
+    penaltyId: string;
+    violationType: string;
+    amountForfeited: number;
+    hcsTransactionId?: string;
+  }) => dispatch('penalty.executed', data),
+
+  agentRegistered: (data: {
+    agentId: string;
+    name: string;
+    version: string;
+  }) => dispatch('agent.registered', data),
+
+  // DEPRECATED: use trustDeposited instead
   stakeAllocated: (data: {
     agentId: string;
     stakeId: string;
@@ -274,6 +312,7 @@ export const emit = {
     tier: string;
   }) => dispatch('stake.allocated', data),
 
+  // DEPRECATED: use penaltyExecuted instead
   slashExecuted: (data: {
     agentId: string;
     slashId: string;
@@ -282,12 +321,6 @@ export const emit = {
     claimantAddress: string;
     hcsTransactionId?: string;
   }) => dispatch('slash.executed', data),
-
-  agentRegistered: (data: {
-    agentId: string;
-    name: string;
-    version: string;
-  }) => dispatch('agent.registered', data),
 
   webhookTest: (webhookId: string) => dispatch('webhook.test', {
     webhookId,

@@ -5,7 +5,7 @@
  * All SDK classes are loaded on first use via loadSDK().
  */
 
-import type { AuditCertificate, SlashEvent } from '../engine/types';
+import type { AuditCertificate, SlashEvent, PenaltyEvent } from '../engine/types';
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -159,12 +159,52 @@ export async function submitCertificateToHCS(
   };
 }
 
-// ─── Slash Event Anchoring ────────────────────────────────────────────────────
+// ─── Penalty Event Anchoring ──────────────────────────────────────────────────
+// CORE PRINCIPLE: BorealisMark is the data layer, not the risk layer.
+// Penalty events record trust deposit forfeitures to protocol treasury.
 
 /**
- * Anchors a slashing event on-chain.
- * This creates the immutable record that a violation occurred and stake was
- * redistributed — the enforcement proof.
+ * Anchors a penalty event on-chain.
+ * This creates the immutable record that a violation occurred and a trust deposit
+ * was forfeited — the enforcement proof. Forfeited amount goes to protocol treasury.
+ */
+export async function submitPenaltyEventToHCS(
+  client: any,
+  topicId: string,
+  penaltyEvent: PenaltyEvent,
+): Promise<HCSSubmitResult> {
+  const { TopicMessageSubmitTransaction, TopicId } = await loadSDK();
+
+  const message = JSON.stringify({
+    protocol: 'BorealisMark/1.0',
+    type: 'PENALTY_EVENT',
+    penaltyId: penaltyEvent.penaltyId,
+    agentId: penaltyEvent.agentId,
+    violationType: penaltyEvent.violationType,
+    amountForfeited: penaltyEvent.amountForfeited,
+    executedAt: penaltyEvent.executedAt,
+  });
+
+  const tx = await new TopicMessageSubmitTransaction()
+    .setTopicId(TopicId.fromString(topicId))
+    .setMessage(message)
+    .execute(client);
+
+  const receipt = await tx.getReceipt(client);
+  const record = await tx.getRecord(client);
+
+  return {
+    topicId,
+    transactionId: tx.transactionId.toString(),
+    sequenceNumber: receipt.topicSequenceNumber?.toNumber() ?? 0,
+    consensusTimestamp: record.consensusTimestamp?.toDate().toISOString() ?? new Date().toISOString(),
+  };
+}
+
+// ─── Backward Compatibility Alias ──────────────────────────────────────────────
+
+/**
+ * @deprecated Use submitPenaltyEventToHCS instead
  */
 export async function submitSlashEventToHCS(
   client: any,

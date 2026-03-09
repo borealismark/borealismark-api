@@ -105,8 +105,40 @@ export interface AuditCertificate {
   revoked: boolean;
 }
 
-// ─── Staking ──────────────────────────────────────────────────────────────────
+// ─── Trust Deposits ─────────────────────────────────────────────────────────
 
+export type TrustTier =
+  | 'UNVERIFIED'
+  | 'STARTER_TRUST'
+  | 'GROWTH_TRUST'
+  | 'ENTERPRISE_TRUST'
+  | 'INSTITUTIONAL_TRUST'
+  | 'SOVEREIGN_TRUST';
+
+export interface TrustDeposit {
+  depositId: string;
+  agentId: string;
+  usdcAmount: number;
+  tier: TrustTier;
+  depositedAt: number;
+  active: boolean;
+}
+
+export interface PenaltyEvent {
+  penaltyId: string;
+  depositId: string;
+  agentId: string;
+  violationType: ViolationType;
+  amountForfeited: number;
+  executedAt: number;
+  hcsTransactionId?: string;
+}
+
+// ─── Backward Compatibility (Deprecated) ──────────────────────────────────────
+
+/**
+ * @deprecated Use PenaltyEvent instead
+ */
 export type StakeTier =
   | 'NO_COVERAGE'
   | 'STARTUP_SHIELD'
@@ -115,6 +147,9 @@ export type StakeTier =
   | 'INSTITUTIONAL_CITADEL'
   | 'SOVEREIGN_RESERVE';
 
+/**
+ * @deprecated Use TrustDeposit instead
+ */
 export interface StakeAllocation {
   stakeId: string;
   agentId: string;
@@ -125,6 +160,9 @@ export interface StakeAllocation {
   active: boolean;
 }
 
+/**
+ * @deprecated Use PenaltyEvent instead
+ */
 export interface SlashEvent {
   slashId: string;
   stakeId: string;

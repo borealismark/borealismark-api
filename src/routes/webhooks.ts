@@ -199,15 +199,15 @@ router.get('/events', requireApiKey, (_req, res) => {
 // ─── Event Descriptions ───────────────────────────────────────────────────────
 
 const EVENT_DESCRIPTIONS: Record<string, string> = {
-  'audit.completed':   'Fired when an audit certificate is successfully issued.',
-  'audit.anchored':    'Fired when the certificate is confirmed on Hedera HCS.',
-  'score.degraded':    'Fired when an agent score drops by 50+ points vs previous audit.',
-  'score.improved':    'Fired when an agent score improves by 50+ points vs previous audit.',
-  'stake.allocated':   'Fired when BMT stake is allocated to an agent.',
-  'slash.executed':    'Fired when a slashing event is executed.',
-  'agent.registered':  'Fired when a new agent is registered.',
-  'key.revoked':       'Fired when an API key is revoked.',
-  'webhook.test':      'Test ping — use to verify your endpoint configuration.',
+  'audit.completed':        'Fired when an audit certificate is successfully issued.',
+  'audit.anchored':         'Fired when the certificate is confirmed on Hedera HCS.',
+  'score.degraded':         'Fired when an agent score drops by 50+ points vs previous audit.',
+  'score.improved':         'Fired when an agent score improves by 50+ points vs previous audit.',
+  'trust_deposit.allocated': 'Fired when a trust deposit is allocated to an agent.',
+  'penalty.executed':       'Fired when a penalty event is executed against a trust deposit.',
+  'agent.registered':       'Fired when a new agent is registered.',
+  'key.revoked':            'Fired when an API key is revoked.',
+  'webhook.test':           'Test ping — use to verify your endpoint configuration.',
 };
 
 export default router;

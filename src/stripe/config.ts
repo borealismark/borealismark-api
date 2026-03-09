@@ -1,4 +1,10 @@
 /**
+ * CORE PRINCIPLE: BorealisMark is the data layer, not the risk layer.
+ * Revenue comes from: (1) Certification subscriptions, (2) Marketplace platform fees,
+ * (3) Data Intelligence API access. NO insurance products. NO risk underwriting.
+ */
+
+/**
  * BorealisMark Stripe + USDC Pricing Configuration
  * Maps internal product tiers to Stripe product/price IDs
  * Env-var overrides allow seamless sandbox → live migration
@@ -50,7 +56,7 @@ export const AGENT_PLANS: Record<string, StripePlan> = {
       'Up to 50 bot deployments',
       '5x AP multiplier',
       'Dedicated audit liaison',
-      '1.5% transaction fee (vs 2.5%)',
+      '1.5% platform fee (vs 2.5% Standard)',
       'Full analytics suite',
       'Priority incident response',
       'Custom SLA options',
@@ -106,7 +112,7 @@ export const API_TIERS: Record<string, StripePlan> = {
       'Level 3 data access',
       'White-label badges',
       'Dedicated support',
-      '1.0% transaction fee',
+      '1.0% platform fee',
       'Custom SLA',
     ],
   },

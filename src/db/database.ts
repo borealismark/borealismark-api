@@ -51,6 +51,10 @@ function initSchema(db: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_certificates_agent ON audit_certificates(agent_id);
 
+    -- ── Trust Deposits (formerly Staking) ───────────────────────────────────────
+    -- CORE PRINCIPLE: BorealisMark is the data layer, not the risk layer.
+    -- Agents deposit USDC as a trust signal. Forfeited amounts go to protocol treasury.
+    -- Note: bmt_amount and usdc_coverage columns retained for backward compatibility.
     CREATE TABLE IF NOT EXISTS stakes (
       id TEXT PRIMARY KEY,
       agent_id TEXT NOT NULL,
@@ -62,6 +66,9 @@ function initSchema(db: Database.Database): void {
       FOREIGN KEY (agent_id) REFERENCES agents(id)
     );
 
+    -- ── Penalty Events (formerly Slash Events) ───────────────────────────────────
+    -- Immutable record of trust deposit penalties enforced by the protocol.
+    -- Forfeited amounts go to BorealisMark treasury, not to claimants.
     CREATE TABLE IF NOT EXISTS slash_events (
       id TEXT PRIMARY KEY,
       stake_id TEXT NOT NULL,
@@ -1740,11 +1747,18 @@ export function updateCertificateHCS(
 
 // ─── Staking Queries ──────────────────────────────────────────────────────────
 
-export function allocateStake(
+// ─── Trust Deposit Functions (formerly Staking) ─────────────────────────────
+// CORE PRINCIPLE: BorealisMark is the data layer, not the risk layer.
+// Agents deposit USDC to signal trust commitment. Penalties forfeit to treasury.
+
+/**
+ * Creates a new trust deposit for an agent. Deactivates any previous deposit.
+ * Migration note: Uses stakes table for backward compatibility.
+ */
+export function createTrustDeposit(
   id: string,
   agentId: string,
-  bmtAmount: number,
-  usdcCoverage: number,
+  usdcAmount: number,
   tier: string,
 ): void {
   getDb().prepare('UPDATE stakes SET active = 0 WHERE agent_id = ?').run(agentId);
@@ -1752,15 +1766,66 @@ export function allocateStake(
     .prepare(
       'INSERT INTO stakes (id, agent_id, bmt_amount, usdc_coverage, tier, allocated_at) VALUES (?, ?, ?, ?, ?, ?)',
     )
-    .run(id, agentId, bmtAmount, usdcCoverage, tier, Date.now());
+    .run(id, agentId, usdcAmount, usdcAmount, tier, Date.now());
 }
 
-export function getActiveStake(agentId: string): Record<string, unknown> | undefined {
+/**
+ * Retrieves the active trust deposit for an agent.
+ * Migration note: Returns record from stakes table where usdc_coverage is the USDC amount.
+ */
+export function getActiveTrustDeposit(agentId: string): Record<string, unknown> | undefined {
   return getDb()
     .prepare('SELECT * FROM stakes WHERE agent_id = ? AND active = 1')
     .get(agentId) as Record<string, unknown> | undefined;
 }
 
+/**
+ * Records a penalty event when an agent violates protocol constraints.
+ * Forfeited USDC goes to BorealisMark protocol treasury, NOT to a claimant.
+ * Migration note: Uses slash_events table with claimant_address set to protocol treasury address.
+ */
+export function recordPenalty(
+  id: string,
+  depositId: string,
+  agentId: string,
+  violationType: string,
+  amountForfeited: number,
+  hcsTransactionId?: string,
+): void {
+  getDb()
+    .prepare(
+      `INSERT INTO slash_events (id, stake_id, agent_id, violation_type, amount_slashed, claimant_address, executed_at, hcs_transaction_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(id, depositId, agentId, violationType, amountForfeited, 'PROTOCOL_TREASURY', Date.now(), hcsTransactionId ?? null);
+  getDb().prepare('UPDATE stakes SET active = 0 WHERE id = ?').run(depositId);
+}
+
+// ─── Backward Compatibility Aliases ──────────────────────────────────────────
+
+/**
+ * @deprecated Use createTrustDeposit instead
+ */
+export function allocateStake(
+  id: string,
+  agentId: string,
+  bmtAmount: number,
+  usdcCoverage: number,
+  tier: string,
+): void {
+  return createTrustDeposit(id, agentId, usdcCoverage, tier);
+}
+
+/**
+ * @deprecated Use getActiveTrustDeposit instead
+ */
+export function getActiveStake(agentId: string): Record<string, unknown> | undefined {
+  return getActiveTrustDeposit(agentId);
+}
+
+/**
+ * @deprecated Use recordPenalty instead
+ */
 export function recordSlash(
   id: string,
   stakeId: string,
@@ -1770,13 +1835,8 @@ export function recordSlash(
   claimantAddress: string,
   hcsTransactionId?: string,
 ): void {
-  getDb()
-    .prepare(
-      `INSERT INTO slash_events (id, stake_id, agent_id, violation_type, amount_slashed, claimant_address, executed_at, hcs_transaction_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .run(id, stakeId, agentId, violationType, amountSlashed, claimantAddress, Date.now(), hcsTransactionId ?? null);
-  getDb().prepare('UPDATE stakes SET active = 0 WHERE id = ?').run(stakeId);
+  // Ignore claimantAddress; always forfeit to protocol treasury
+  return recordPenalty(id, stakeId, agentId, violationType, amountSlashed, hcsTransactionId);
 }
 
 // ─── API Key Queries ──────────────────────────────────────────────────────────

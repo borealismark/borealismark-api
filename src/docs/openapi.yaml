@@ -6,7 +6,7 @@ info:
     Blockchain-anchored AI Trust Infrastructure on Hedera Hashgraph.
 
     BorealisMark provides cryptographic audit certificates, trust scoring,
-    and decentralized staking for AI agents. All certificates are immutably
+    and decentralized trust deposit verification for AI agents. All certificates are immutably
     anchored to Hedera Consensus Service (HCS).
 
     ## Authentication
@@ -274,8 +274,8 @@ tags:
     description: AI Bot registration, job tracking, rating, and leaderboard system
   - name: Certificates
     description: Audit certificates and trust scores
-  - name: Staking
-    description: BMT staking and slashing
+  - name: Trust Deposit
+    description: Trust deposit allocation and penalty verification
   - name: Network
     description: Network consensus and statistics
   - name: API Keys
@@ -820,7 +820,7 @@ paths:
                   type: array
                   items:
                     type: string
-                    enum: [audit.completed, audit.anchored, score.degraded, score.improved, stake.allocated, slash.executed, agent.registered, key.revoked, webhook.test]
+                    enum: [audit.completed, audit.anchored, score.degraded, score.improved, trust_deposit.allocated, penalty.executed, agent.registered, key.revoked, webhook.test]
       responses:
         '201':
           description: Webhook registered (secret returned once)
@@ -865,11 +865,11 @@ paths:
         '200':
           description: Webhook deleted
 
-  # ── Staking ───────────────────────────────────────────────────
-  /v1/staking/allocate:
+  # ── Trust Deposit ─────────────────────────────────────────────────
+  /v1/trust-deposit/allocate:
     post:
-      tags: [Staking]
-      summary: Allocate BMT stake to an agent
+      tags: [Trust Deposit]
+      summary: Allocate trust deposit to an agent
       security:
         - ApiKeyAuth: []
       requestBody:
@@ -877,22 +877,22 @@ paths:
           application/json:
             schema:
               type: object
-              required: [agentId, bmtAmount]
+              required: [agentId, depositAmount]
               properties:
                 agentId:
                   type: string
-                bmtAmount:
+                depositAmount:
                   type: number
-                usdcCoverage:
+                usdcValue:
                   type: number
       responses:
         '200':
-          description: Stake allocated
+          description: Trust deposit allocated
 
-  /v1/staking/slash:
+  /v1/trust-deposit/penalty:
     post:
-      tags: [Staking]
-      summary: Execute slashing event
+      tags: [Trust Deposit]
+      summary: Execute penalty against trust deposit
       security:
         - ApiKeyAuth: []
       requestBody:
@@ -900,22 +900,24 @@ paths:
           application/json:
             schema:
               type: object
-              required: [agentId, violationType, claimantAddress]
+              required: [agentId, violationType, penaltyAmount, auditAddress]
               properties:
                 agentId:
                   type: string
                 violationType:
                   type: string
-                claimantAddress:
+                penaltyAmount:
+                  type: number
+                auditAddress:
                   type: string
       responses:
         '200':
-          description: Slash executed
+          description: Penalty executed
 
-  /v1/staking/{agentId}:
+  /v1/trust-deposit/{agentId}:
     get:
-      tags: [Staking]
-      summary: Get active stake for agent
+      tags: [Trust Deposit]
+      summary: Get active trust deposit for agent
       security:
         - ApiKeyAuth: []
       parameters:
@@ -926,7 +928,7 @@ paths:
             type: string
       responses:
         '200':
-          description: Active stake details
+          description: Active trust deposit details
 
   # ── Network ───────────────────────────────────────────────────
   /v1/network/consensus:
