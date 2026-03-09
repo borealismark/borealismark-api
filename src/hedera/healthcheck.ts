@@ -7,6 +7,7 @@
  */
 
 import { logger } from '../middleware/logger';
+import { validateTreasuryAccounts } from './treasury';
 
 export interface HealthCheckResult {
   valid: boolean;
@@ -98,6 +99,11 @@ export function validateHederaConfig(): HealthCheckResult {
       logger.info('✓ HEDERA_USDC_TOKEN_ID configured', { tokenId: usdcTokenId });
     }
   }
+
+  // Treasury account validation
+  const treasury = validateTreasuryAccounts();
+  treasury.errors.forEach(e => errors.push(e));
+  treasury.warnings.forEach(w => warnings.push(w));
 
   // Summary
   const configured = accountId && privateKey && network;

@@ -485,9 +485,9 @@ export async function handleSupportChat(req: ChatRequest): Promise<ChatResponse>
       messages,
     });
 
-    let reply = response.content
-      .filter((block): block is Anthropic.TextBlock => block.type === 'text')
-      .map(block => block.text)
+    let reply = (response.content as Anthropic.TextBlock[])
+      .filter((block: Anthropic.TextBlock) => block.type === 'text')
+      .map((block: Anthropic.TextBlock) => block.text)
       .join('\n');
 
     // Check for business escalation tag

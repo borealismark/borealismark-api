@@ -4,7 +4,9 @@ import cors from 'cors';
 import path from 'path';
 import { getDb, seedProhibitedItems, seedApiTiers } from './db/database';
 import { requestLogger, logger } from './middleware/logger';
+import { initTurso, isTursoEnabled } from './db/turso';
 import { globalLimiter } from './middleware/rateLimiter';
+import { requireApiKey } from './middleware/auth';
 import authRouter from './routes/auth';
 import agentsRouter from './routes/agents';
 import trustRouter from './routes/trust';
@@ -24,11 +26,14 @@ import supportRouter from './routes/support';
 import analyticsRouter from './routes/analytics';
 import adminRouter from './routes/admin';
 import adminMailRouter from './routes/adminMail';
+import imagesRouter from './routes/images';
 import { cleanupExpiredInvoices } from './hedera/usdc';
 import { validateHederaConfig, logHealthCheckResults } from './hedera/healthcheck';
+import { validateStripeConfig, getStripeMode } from './stripe/mode';
 import { startAggregationSchedule } from './services/dataStore';
 import { startAnchoringSchedule } from './services/hederaAnchor';
 import { events as eventBus, initAdminNotifications } from './services/eventBus';
+import { getDetailedHealth } from './services/monitoring';
 import {
   getExpiredUsdcSubscriptions, getAllExpiredSubscriptions, getExpiringSubscriptions,
   updateUserTier, getExpiredSanctions, upsertUserSanction,
@@ -93,10 +98,32 @@ function validateEnvironment(): void {
 // Validate environment at startup
 validateEnvironment();
 
+// ─── Database initialization ───
+
+if (isTursoEnabled()) {
+  try {
+    initTurso();
+    logger.info('Using Turso (LibSQL) for persistent database');
+  } catch (err) {
+    logger.error('Failed to initialize Turso', { error: String(err) });
+    process.exit(1);
+  }
+} else {
+  logger.info('Using local SQLite (better-sqlite3) — data is ephemeral on Render free tier');
+}
+
 // ─── Hedera Configuration Health Check ────────────────────────────────────
 
 const hederaHealth = validateHederaConfig();
 logHealthCheckResults(hederaHealth);
+
+// ─── Stripe validation ────────────────────────────────────────────────────────
+const stripeHealth = validateStripeConfig();
+if (stripeHealth.errors.length > 0) {
+  stripeHealth.errors.forEach(e => logger.error(`Stripe: ${e}`));
+  if (process.env.NODE_ENV === 'production') process.exit(1);
+}
+stripeHealth.warnings.forEach(w => logger.warn(`Stripe: ${w}`));
 
 // ─── Security Hardening ───────────────────────────────────────────────────────
 
@@ -168,6 +195,7 @@ app.use('/v1/marketplace', ordersRouter);
 app.use('/v1/usage',    usageRouter);
 app.use('/v1/docs',     docsRouter);
 app.use('/v1/images',   imageProxyRouter);
+app.use('/v1/images',   imagesRouter);
 app.use('/v1/bots',     botsRouter);
 app.use('/v1/support',  supportRouter);
 app.use('/v1/analytics', analyticsRouter);
@@ -208,28 +236,16 @@ app.get('/sitemap.xml', (_req, res) => {
 // ─── Health ───────────────────────────────────────────────────────────────────
 
 app.get('/health', (_req, res) => {
-  try {
-    // Verify database connectivity with a simple query
-    const db = getDb();
-    db.prepare('SELECT 1').get();
+  const health = getDetailedHealth();
+  const statusCode = health.status === 'unhealthy' ? 503 : 200;
+  res.status(statusCode).json(health);
+});
 
-    res.json({
-      status: 'healthy',
-      service: 'BorealisMark Protocol API',
-      version: '1.4.0',
-      database: 'connected',
-      timestamp: Date.now(),
-    });
-  } catch (err: any) {
-    logger.error('Health check failed', { error: err.message });
-    res.status(503).json({
-      status: 'unhealthy',
-      service: 'BorealisMark Protocol API',
-      database: 'disconnected',
-      error: err.message,
-      timestamp: Date.now(),
-    });
-  }
+// Detailed health (requires API key for sensitive info)
+app.get('/health/detailed', requireApiKey, (_req, res) => {
+  const health = getDetailedHealth();
+  const statusCode = health.status === 'unhealthy' ? 503 : 200;
+  res.status(statusCode).json(health);
 });
 
 // ─── 404 ──────────────────────────────────────────────────────────────────────

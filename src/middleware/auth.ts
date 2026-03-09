@@ -57,12 +57,13 @@ export function requireApiKey(req: Request, res: Response, next: NextFunction): 
  * Must be used AFTER requireApiKey.
  *
  * Scope hierarchy:
- *   admin  → can do everything (create/revoke keys, manage webhooks, run audits, read)
+ *   admin  → can do everything (create/revoke keys, manage webhooks, run audits, write, read)
  *   audit  → can register agents and run audits
+ *   write  → can upload images and modify resources
  *   webhook → can manage webhooks
  *   read   → can retrieve certificates and scores
  */
-export function requireScope(scope: 'audit' | 'read' | 'webhook' | 'admin') {
+export function requireScope(scope: 'audit' | 'read' | 'write' | 'webhook' | 'admin') {
   return (req: Request, res: Response, next: NextFunction): void => {
     const authReq = req as AuthenticatedRequest;
     const { scopes } = authReq.apiKey;

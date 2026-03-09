@@ -24,6 +24,11 @@ services:
         value: "0.0.10277625"
       - key: HEDERA_MIRROR_NODE_URL
         value: "https://testnet.mirrornode.hedera.com"
+      # Database (Turso for production persistence)
+      - key: TURSO_DATABASE_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
+        sync: false
       # Auth
       - key: API_MASTER_KEY
         generateValue: true

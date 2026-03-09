@@ -1,8 +1,18 @@
+/**
+ * Database Layer — Dual Backend Support
+ *
+ * Production: Turso (LibSQL) — persistent, replicated, edge-distributed
+ * Development: better-sqlite3 — local file-based, zero config
+ *
+ * Set TURSO_DATABASE_URL + TURSO_AUTH_TOKEN to use Turso.
+ * Otherwise falls back to local SQLite via better-sqlite3.
+ */
 import Database from 'better-sqlite3';
 import path from 'path';
 import { createHash, randomBytes } from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import { logger } from '../middleware/logger';
+import { isTursoEnabled } from './turso';
 
 let db: Database.Database;
 
