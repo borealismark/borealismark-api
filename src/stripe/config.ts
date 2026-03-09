@@ -22,8 +22,8 @@ export interface StripePlan {
 export const AGENT_PLANS: Record<string, StripePlan> = {
   pro: {
     name: 'BorealisMark Pro',
-    productId: process.env.STRIPE_PRO_PRODUCT_ID ?? 'prod_U66ZErtSnBzoBL',
-    priceId: process.env.STRIPE_PRO_PRICE_ID ?? 'price_1T7uLvJ5qkaENvhUnLYNkUrI',
+    productId: process.env.STRIPE_PRO_PRODUCT_ID ?? 'prod_U75klfzF8JQGGB',
+    priceId: process.env.STRIPE_PRO_PRICE_ID ?? 'price_1T8rYhJ5qkaENvhUPWdG40Gf',
     amount: 14900,
     currency: 'usd',
     interval: 'year',
@@ -40,8 +40,8 @@ export const AGENT_PLANS: Record<string, StripePlan> = {
   },
   elite: {
     name: 'BorealisMark Elite',
-    productId: process.env.STRIPE_ELITE_PRODUCT_ID ?? 'prod_U66ZiaE5IPDZuf',
-    priceId: process.env.STRIPE_ELITE_PRICE_ID ?? 'price_1T7uLsJ5qkaENvhU1X2hN83W',
+    productId: process.env.STRIPE_ELITE_PRODUCT_ID ?? 'prod_U75kbvUp2uKsCR',
+    priceId: process.env.STRIPE_ELITE_PRICE_ID ?? 'price_1T8rZ8J5qkaENvhU4ltxismU',
     amount: 34900,
     currency: 'usd',
     interval: 'year',
@@ -63,8 +63,8 @@ export const AGENT_PLANS: Record<string, StripePlan> = {
 export const API_TIERS: Record<string, StripePlan> = {
   starter: {
     name: 'API Starter (Verify)',
-    productId: process.env.STRIPE_STARTER_PRODUCT_ID ?? 'prod_U66ZJLWLqbMeyt',
-    priceId: process.env.STRIPE_STARTER_PRICE_ID ?? 'price_1T7uLtJ5qkaENvhUYrD3Ss5e',
+    productId: process.env.STRIPE_STARTER_PRODUCT_ID ?? 'prod_U75lBiQda1OI5I',
+    priceId: process.env.STRIPE_STARTER_PRICE_ID ?? 'price_1T8raFJ5qkaENvhUv88yTKQH',
     amount: 2900,
     currency: 'usd',
     interval: 'month',
@@ -78,8 +78,8 @@ export const API_TIERS: Record<string, StripePlan> = {
   },
   business: {
     name: 'API Business (Analyze)',
-    productId: process.env.STRIPE_BUSINESS_PRODUCT_ID ?? 'prod_U66YidiqsewMKf',
-    priceId: process.env.STRIPE_BUSINESS_PRICE_ID ?? 'price_1T7uLrJ5qkaENvhUQ1GOXfhH',
+    productId: process.env.STRIPE_BUSINESS_PRODUCT_ID ?? 'prod_U75mJ0CSFC36JO',
+    priceId: process.env.STRIPE_BUSINESS_PRICE_ID ?? 'price_1T8ragJ5qkaENvhUtXAti480',
     amount: 14900,
     currency: 'usd',
     interval: 'month',
@@ -94,8 +94,8 @@ export const API_TIERS: Record<string, StripePlan> = {
   },
   enterprise: {
     name: 'API Enterprise (Predict)',
-    productId: process.env.STRIPE_ENTERPRISE_PRODUCT_ID ?? 'prod_U66Z8frvO4c8Ef',
-    priceId: process.env.STRIPE_ENTERPRISE_PRICE_ID ?? 'price_1T7uLuJ5qkaENvhUBvPN4AXr',
+    productId: process.env.STRIPE_ENTERPRISE_PRODUCT_ID ?? 'prod_U75nSvMjZVwBRa',
+    priceId: process.env.STRIPE_ENTERPRISE_PRICE_ID ?? 'price_1T8rbcJ5qkaENvhUF65knR1q',
     amount: 49900,
     currency: 'usd',
     interval: 'month',
