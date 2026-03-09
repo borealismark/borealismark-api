@@ -143,7 +143,7 @@ app.get('/health', (_req, res) => {
   res.json({
     status: 'ok',
     service: 'BorealisMark Protocol API',
-    version: '1.2.0',
+    version: '1.3.0',
     timestamp: Date.now(),
   });
 });
