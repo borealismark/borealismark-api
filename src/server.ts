@@ -26,7 +26,7 @@ import adminRouter from './routes/admin';
 import { cleanupExpiredInvoices } from './hedera/usdc';
 import { startAggregationSchedule } from './services/dataStore';
 import { startAnchoringSchedule } from './services/hederaAnchor';
-import { events as eventBus } from './services/eventBus';
+import { events as eventBus, initAdminNotifications } from './services/eventBus';
 import {
   getExpiredUsdcSubscriptions, getAllExpiredSubscriptions, getExpiringSubscriptions,
   updateUserTier, getExpiredSanctions, upsertUserSanction,
@@ -413,6 +413,7 @@ app.listen(PORT, () => {
   // Start data infrastructure
   startAggregationSchedule();
   startAnchoringSchedule();
+  initAdminNotifications();
 
   // Emit system startup event
   eventBus.systemError('startup', 'API started successfully'); // reusing as system event

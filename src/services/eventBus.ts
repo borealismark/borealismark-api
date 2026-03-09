@@ -225,12 +225,12 @@ function upsertAggregateIncrement(metricKey: string, period: string, periodStart
 // ─── Convenience Emitters ───────────────────────────────────────────────────
 
 export const events = {
-  userRegistered: (userId: string, email: string) => emit({
+  userRegistered: (userId: string, email: string, name?: string) => emit({
     eventType: EventTypes.USER_REGISTERED,
     category: 'auth',
     actorId: userId,
     actorType: 'user',
-    payload: { email },
+    payload: { email, name: name ?? email.split('@')[0] },
   }),
 
   userLogin: (userId: string) => emit({
@@ -343,6 +343,47 @@ export const events = {
     payload: { hcsTxId },
   }),
 
+  // Payment
+  checkoutStarted: (userId: string, planId: string, method: string) => emit({
+    eventType: EventTypes.CHECKOUT_STARTED,
+    category: 'payment',
+    actorId: userId,
+    actorType: 'user',
+    payload: { planId, method },
+  }),
+
+  subscriptionCreated: (userId: string, tier: string, method: string, planId?: string, extra?: { email?: string; name?: string; previousTier?: string }) => emit({
+    eventType: EventTypes.SUBSCRIPTION_CREATED,
+    category: 'payment',
+    actorId: userId,
+    actorType: 'user',
+    payload: { tier, method, planId, ...extra },
+  }),
+
+  subscriptionRenewed: (userId: string, tier: string, method: string) => emit({
+    eventType: EventTypes.SUBSCRIPTION_RENEWED,
+    category: 'payment',
+    actorId: userId,
+    actorType: 'user',
+    payload: { tier, method },
+  }),
+
+  subscriptionExpired: (userId: string, previousTier: string) => emit({
+    eventType: EventTypes.SUBSCRIPTION_EXPIRED,
+    category: 'payment',
+    actorId: userId,
+    actorType: 'user',
+    payload: { previousTier },
+  }),
+
+  usdcPaymentReceived: (userId: string, amount: number, planId: string) => emit({
+    eventType: EventTypes.USDC_PAYMENT_RECEIVED,
+    category: 'payment',
+    actorId: userId,
+    actorType: 'user',
+    payload: { amount, planId },
+  }),
+
   systemError: (component: string, error: string) => emit({
     eventType: EventTypes.SYSTEM_ERROR,
     category: 'system',
@@ -350,3 +391,44 @@ export const events = {
     payload: { component, error },
   }),
 };
+
+// ─── Admin Notification Listeners ─────────────────────────────────────────
+
+/**
+ * Initialize event listeners that send admin email notifications.
+ * Called once at server startup.
+ */
+export function initAdminNotifications(): void {
+  // Notify admin on new user registration
+  onEvent(EventTypes.USER_REGISTERED, async (event) => {
+    try {
+      const { sendAdminNewUserNotification } = await import('./email');
+      const email = event.payload?.email ?? 'unknown';
+      const name = event.payload?.name ?? email.split('@')[0];
+      await sendAdminNewUserNotification(email, name, event.actorId ?? 'unknown', 'standard');
+    } catch (err: any) {
+      logger.error('Admin registration notification failed', { error: err.message });
+    }
+  });
+
+  // Notify admin on subscription upgrade
+  onEvent(EventTypes.SUBSCRIPTION_CREATED, async (event) => {
+    try {
+      const { sendAdminSubscriptionNotification } = await import('./email');
+      const { tier, method, planId, email, name, previousTier } = event.payload ?? {};
+      await sendAdminSubscriptionNotification(
+        email ?? 'unknown',
+        name ?? 'User',
+        event.actorId ?? 'unknown',
+        tier ?? 'pro',
+        previousTier ?? 'standard',
+        method ?? 'unknown',
+        planId,
+      );
+    } catch (err: any) {
+      logger.error('Admin subscription notification failed', { error: err.message });
+    }
+  });
+
+  logger.info('Admin notification listeners initialized');
+}

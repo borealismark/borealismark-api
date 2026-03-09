@@ -45,6 +45,7 @@ import {
   saveUsdcInvoiceWithDiscount,
 } from '../db/database';
 import { v4 as uuidv4 } from 'uuid';
+import { events as eventBus } from '../services/eventBus';
 
 const router = Router();
 
@@ -403,6 +404,14 @@ router.post('/usdc/verify/:invoiceId', async (req: Request, res: Response) => {
           invoiceId,
           subscriptionExpiresAt: new Date(expiresAt).toISOString(),
         });
+
+        // Emit events for activity log + admin notification
+        eventBus.usdcPaymentReceived(user.id, Number(invoice.amountUsdc) || 0, invoice.planId);
+        eventBus.subscriptionCreated(user.id, targetTier, 'usdc', invoice.planId, {
+          email: invoiceRecord.email,
+          name: user.name,
+          previousTier: user.tier,
+        });
       } else {
         logger.warn('USDC payment confirmed but user not found', {
           email: invoiceRecord.email,
@@ -729,6 +738,13 @@ router.post('/webhook', async (req: Request, res: Response) => {
               userId: user.id, newTier: targetTier, customerId,
               subscriptionExpiresAt: new Date(expiresAt).toISOString(),
             });
+
+            // Emit subscription event for admin notification + activity log
+            eventBus.subscriptionCreated(user.id, targetTier, 'stripe', plan?.tier, {
+              email: customerEmail,
+              name: user.name,
+              previousTier: user.tier,
+            });
           }
         }
         break;
@@ -775,6 +791,7 @@ router.post('/webhook', async (req: Request, res: Response) => {
             logger.info('Stripe subscription cancelled → downgraded to standard', {
               userId: user.id, customerId: sub.customer,
             });
+            eventBus.subscriptionExpired(user.id, user.tier);
           }
         }
         break;

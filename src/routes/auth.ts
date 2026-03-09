@@ -179,7 +179,7 @@ router.post('/register', authLimiter, async (req: Request, res: Response) => {
     const emailSent = await sendVerificationEmail(email, verifyToken, name);
 
     logger.info('User registered', { userId, email, verificationEmailSent: emailSent });
-    eventBus.userRegistered(userId, email);
+    eventBus.userRegistered(userId, email, name);
 
     res.status(201).json({
       success: true,

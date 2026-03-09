@@ -628,3 +628,178 @@ export async function sendSettlementCompleteEmail(
   const text = `Transaction Complete — Order ${data.orderId}\nItem: ${data.listingTitle}`;
   return sendOrderEmail(email, `Transaction Complete — ${data.listingTitle}`, html, text);
 }
+
+// ─── Admin Notification Emails ──────────────────────────────────────────────
+
+const ADMIN_EMAIL = process.env.ADMIN_NOTIFICATION_EMAIL ?? 'esimon.ng@gmail.com';
+
+/**
+ * Notify the platform admin when a new user registers.
+ */
+export async function sendAdminNewUserNotification(
+  userEmail: string,
+  userName: string,
+  userId: string,
+  tier: string = 'standard',
+): Promise<boolean> {
+  const timestamp = new Date().toLocaleString('en-US', { timeZone: 'America/Toronto' });
+  const dashboardUrl = 'https://borealismark-api.onrender.com/v1/admin/users';
+
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0C0D10; color: #E0E0E0; }
+    .container { max-width: 560px; margin: 40px auto; padding: 0 20px; }
+    .card { background: #16171C; border: 1px solid #2A2B33; border-radius: 12px; padding: 32px; }
+    .logo { color: #D4A853; font-size: 20px; font-weight: 700; margin-bottom: 20px; }
+    h1 { font-size: 20px; font-weight: 600; color: #4CAF50; margin: 0 0 16px 0; }
+    p { font-size: 15px; line-height: 1.6; color: #A0A0A0; margin: 0 0 12px 0; }
+    .detail { font-size: 14px; color: #888; margin: 6px 0; }
+    .detail strong { color: #CCC; }
+    .highlight { color: #D4A853; font-weight: 600; }
+    .divider { border-top: 1px solid #2A2B33; margin: 20px 0; }
+    .footer { text-align: center; padding: 20px 0; font-size: 12px; color: #555; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="card">
+      <div class="logo">BorealisMark Admin</div>
+      <h1>New User Registered</h1>
+      <p>A new user has just signed up on the BorealisMark platform.</p>
+      <div class="divider"></div>
+      <p class="detail"><strong>Name:</strong> <span class="highlight">${userName}</span></p>
+      <p class="detail"><strong>Email:</strong> ${userEmail}</p>
+      <p class="detail"><strong>Tier:</strong> ${tier}</p>
+      <p class="detail"><strong>User ID:</strong> <span style="font-family:monospace;font-size:12px">${userId}</span></p>
+      <p class="detail"><strong>Registered:</strong> ${timestamp}</p>
+      <div class="divider"></div>
+      <p class="detail" style="color:#666">View all users in the admin dashboard.</p>
+    </div>
+    <div class="footer">&copy; ${new Date().getFullYear()} BorealisMark Protocol — Admin Notification</div>
+  </div>
+</body>
+</html>`;
+
+  const text = `New User Registered\n\nName: ${userName}\nEmail: ${userEmail}\nTier: ${tier}\nUser ID: ${userId}\nRegistered: ${timestamp}\n\nDashboard: ${dashboardUrl}`;
+
+  if (!process.env.RESEND_API_KEY) {
+    logger.info('Admin new user notification (NOT SENT — no RESEND_API_KEY)', {
+      to: ADMIN_EMAIL, userEmail, userName, userId,
+    });
+    return true;
+  }
+
+  try {
+    const result = await getResend().emails.send({
+      from: FROM_ADDRESS,
+      to: [ADMIN_EMAIL],
+      subject: `New User: ${userName} (${userEmail})`,
+      html,
+      text,
+    });
+    if (result.error) {
+      logger.error('Admin notification send failed', { error: result.error });
+      return false;
+    }
+    logger.info('Admin new user notification sent', { to: ADMIN_EMAIL, userEmail });
+    return true;
+  } catch (err: any) {
+    logger.error('Admin notification error', { error: err.message });
+    return false;
+  }
+}
+
+/**
+ * Notify the platform admin when a user upgrades their subscription plan.
+ */
+export async function sendAdminSubscriptionNotification(
+  userEmail: string,
+  userName: string,
+  userId: string,
+  newTier: string,
+  previousTier: string,
+  method: string,
+  planId?: string,
+): Promise<boolean> {
+  const timestamp = new Date().toLocaleString('en-US', { timeZone: 'America/Toronto' });
+  const tierColors: Record<string, string> = {
+    standard: '#888',
+    starter: '#4CAF50',
+    pro: '#2196F3',
+    business: '#9C27B0',
+    elite: '#D4A853',
+    enterprise: '#FF5722',
+  };
+  const color = tierColors[newTier.toLowerCase()] ?? '#D4A853';
+
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0C0D10; color: #E0E0E0; }
+    .container { max-width: 560px; margin: 40px auto; padding: 0 20px; }
+    .card { background: #16171C; border: 1px solid #2A2B33; border-radius: 12px; padding: 32px; }
+    .logo { color: #D4A853; font-size: 20px; font-weight: 700; margin-bottom: 20px; }
+    h1 { font-size: 20px; font-weight: 600; color: ${color}; margin: 0 0 16px 0; }
+    p { font-size: 15px; line-height: 1.6; color: #A0A0A0; margin: 0 0 12px 0; }
+    .detail { font-size: 14px; color: #888; margin: 6px 0; }
+    .detail strong { color: #CCC; }
+    .highlight { color: #D4A853; font-weight: 600; }
+    .tier-badge { display: inline-block; padding: 4px 12px; border-radius: 6px; font-weight: 600; font-size: 14px; }
+    .divider { border-top: 1px solid #2A2B33; margin: 20px 0; }
+    .footer { text-align: center; padding: 20px 0; font-size: 12px; color: #555; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="card">
+      <div class="logo">BorealisMark Admin</div>
+      <h1>Subscription ${previousTier === 'standard' ? 'Upgrade' : 'Change'}</h1>
+      <p>A user has ${previousTier === 'standard' ? 'upgraded their subscription' : 'changed their plan'}.</p>
+      <div class="divider"></div>
+      <p class="detail"><strong>User:</strong> <span class="highlight">${userName}</span> (${userEmail})</p>
+      <p class="detail"><strong>Plan Change:</strong> ${previousTier} &rarr; <span class="tier-badge" style="background:${color}22;color:${color};border:1px solid ${color}44">${newTier.toUpperCase()}</span></p>
+      <p class="detail"><strong>Payment Method:</strong> ${method === 'stripe' ? 'Stripe (Card)' : 'USDC (Hedera)'}</p>
+      ${planId ? `<p class="detail"><strong>Plan ID:</strong> <span style="font-family:monospace;font-size:12px">${planId}</span></p>` : ''}
+      <p class="detail"><strong>User ID:</strong> <span style="font-family:monospace;font-size:12px">${userId}</span></p>
+      <p class="detail"><strong>Time:</strong> ${timestamp}</p>
+    </div>
+    <div class="footer">&copy; ${new Date().getFullYear()} BorealisMark Protocol — Admin Notification</div>
+  </div>
+</body>
+</html>`;
+
+  const text = `Subscription ${previousTier === 'standard' ? 'Upgrade' : 'Change'}\n\nUser: ${userName} (${userEmail})\nPlan: ${previousTier} → ${newTier}\nMethod: ${method}\nTime: ${timestamp}`;
+
+  if (!process.env.RESEND_API_KEY) {
+    logger.info('Admin subscription notification (NOT SENT — no RESEND_API_KEY)', {
+      to: ADMIN_EMAIL, userEmail, newTier, previousTier, method,
+    });
+    return true;
+  }
+
+  try {
+    const result = await getResend().emails.send({
+      from: FROM_ADDRESS,
+      to: [ADMIN_EMAIL],
+      subject: `${previousTier === 'standard' ? 'New' : ''} ${newTier.toUpperCase()} Sub: ${userName} (${method})`,
+      html,
+      text,
+    });
+    if (result.error) {
+      logger.error('Admin subscription notification failed', { error: result.error });
+      return false;
+    }
+    logger.info('Admin subscription notification sent', { to: ADMIN_EMAIL, userEmail, newTier });
+    return true;
+  } catch (err: any) {
+    logger.error('Admin subscription notification error', { error: err.message });
+    return false;
+  }
+}
