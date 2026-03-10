@@ -17,7 +17,18 @@ import { Resend } from 'resend';
 
 const router = Router();
 
+// CRITICAL: Outbound emails MUST use verified branded domains — NEVER *.cloudflare.dev or *.workers.dev
 const FROM_ADDRESS = process.env.EMAIL_FROM ?? 'BorealisMark Support <support@borealisprotocol.ai>';
+const VERIFY_FROM_ADDRESS = 'Borealis Terminal Verification <verify@borealisprotocol.ai>';
+
+// Safety: ensure FROM addresses never use .dev or workers.dev domains
+function getSafeFromAddress(address: string): string {
+  if (address.includes('.workers.dev') || address.includes('.pages.dev') || address.includes('cloudflare.dev')) {
+    logger.warn('Blocked outbound email from .dev domain', { attempted: address });
+    return FROM_ADDRESS; // fallback to the verified branded domain
+  }
+  return address;
+}
 
 // ─── Rate limiting for chat (simple in-memory) ──────────────────────────────
 
@@ -143,12 +154,19 @@ router.post('/email-inbound', async (req: Request, res: Response) => {
       const resend = new Resend(apiKey);
       const emailHtml = buildSupportReplyHtml(fromName || from.split('@')[0], subject, aiReply);
 
+      // Use branded FROM address — verification emails use verify@, all others use support@
+      const isVerificationEmail = to?.toLowerCase().includes('verify@borealisterminal.com');
+      const replyFrom = getSafeFromAddress(isVerificationEmail ? VERIFY_FROM_ADDRESS : FROM_ADDRESS);
+      const sigLine = isVerificationEmail
+        ? 'Aurora — Borealis Terminal Verification\nverify@borealisterminal.com\nhttps://borealisterminal.com'
+        : 'Aurora — BorealisMark AI Support\nsupport@borealisprotocol.ai\nhttps://borealisprotocol.ai';
+
       const result = await resend.emails.send({
-        from: FROM_ADDRESS,
+        from: replyFrom,
         to: [from],
         subject: subject.startsWith('Re:') ? subject : `Re: ${subject}`,
         html: emailHtml,
-        text: `Hi ${fromName || 'there'},\n\n${aiReply}\n\n---\nAurora — BorealisMark AI Support\nsupport@borealisprotocol.ai\nhttps://borealisprotocol.ai`,
+        text: `Hi ${fromName || 'there'},\n\n${aiReply}\n\n---\n${sigLine}`,
         ...(messageId ? { headers: { 'In-Reply-To': messageId, 'References': messageId } } : {}),
       });
 

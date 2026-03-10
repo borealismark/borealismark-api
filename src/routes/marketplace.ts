@@ -67,6 +67,7 @@ import {
 } from '../middleware/messageModeration';
 import { importEbayStore } from '../services/ebayScraper';
 import { createHash } from 'crypto';
+import { storeInboundEmail } from './adminMail';
 
 const router = Router();
 
@@ -3275,6 +3276,177 @@ router.post('/admin/unsanction', requireAuth, async (req: Request, res: Response
   } catch (err: any) {
     logger.error('Admin unsanction error', { error: err.message });
     res.status(500).json({ success: false, error: 'Failed to lift sanction' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ─── STORE MIGRATION REQUEST ─────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const MigrationRequestSchema = z.object({
+  platform: z.enum(['ebay', 'etsy', 'shopify', 'amazon', 'woocommerce', 'other']),
+  storeUrl: z.string().url().max(500),
+  storeName: z.string().min(1).max(200),
+  listingCount: z.enum(['1-50', '51-200', '201-500', '500+']).optional(),
+  notes: z.string().max(2000).optional(),
+  verifyMethod: z.enum(['code', 'listing', 'email']),
+  verifyCode: z.string().regex(/^BT-[A-Z0-9]{8}$/),
+});
+
+/**
+ * POST /v1/marketplace/migration-request — Submit a store migration request
+ *
+ * Requires authentication. Validates the migration data, stores the request
+ * in the admin mail center for Aurora / admin review, and returns confirmation.
+ */
+router.post('/migration-request', requireAuth, async (req: Request, res: Response) => {
+  try {
+    const authReq = req as AuthRequest;
+    const userId = authReq.user?.sub;
+    const userEmail = authReq.user?.email || 'unknown';
+    if (!userId) return res.status(401).json({ success: false, error: 'Not authenticated' });
+
+    // ─── Rate limit: 1 migration request per 60 seconds per user ──────
+    const rateLimitKey = `migration:${userId}`;
+    const now = Date.now();
+    if ((globalThis as any).__migrationRateLimit === undefined) {
+      (globalThis as any).__migrationRateLimit = new Map<string, number>();
+    }
+    const rateMap = (globalThis as any).__migrationRateLimit as Map<string, number>;
+    const lastRequest = rateMap.get(rateLimitKey) || 0;
+    if (now - lastRequest < 60_000) {
+      return res.status(429).json({
+        success: false,
+        error: 'Please wait before submitting another migration request.',
+      });
+    }
+    rateMap.set(rateLimitKey, now);
+
+    // ─── Validate request body ────────────────────────────────────────
+    const parsed = MigrationRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({
+        success: false,
+        error: 'Validation failed',
+        details: parsed.error.flatten().fieldErrors,
+      });
+    }
+
+    const { platform, storeUrl, storeName, listingCount, notes, verifyMethod, verifyCode } = parsed.data;
+
+    // ─── Sanitize URL: only allow http/https ──────────────────────────
+    try {
+      const url = new URL(storeUrl);
+      if (!['http:', 'https:'].includes(url.protocol)) {
+        return res.status(400).json({ success: false, error: 'Invalid store URL protocol' });
+      }
+    } catch {
+      return res.status(400).json({ success: false, error: 'Invalid store URL' });
+    }
+
+    const platformNames: Record<string, string> = {
+      ebay: 'eBay', etsy: 'Etsy', shopify: 'Shopify',
+      amazon: 'Amazon', woocommerce: 'WooCommerce', other: 'Other',
+    };
+
+    const verifyMethodNames: Record<string, string> = {
+      code: 'Meta Tag / Description Code',
+      listing: 'Verification Listing',
+      email: 'Email Verification',
+    };
+
+    // ─── Store as admin mail (internal notification) ──────────────────
+    const subject = `Store Migration Request: ${platformNames[platform] || platform} → Borealis Terminal [${verifyCode}]`;
+    const bodyText = [
+      '=== STORE MIGRATION REQUEST ===',
+      '',
+      `User ID: ${userId}`,
+      `User Email: ${userEmail}`,
+      `Source Platform: ${platformNames[platform] || platform}`,
+      `Store URL: ${storeUrl}`,
+      `Store Name: ${storeName}`,
+      `Estimated Listings: ${listingCount || 'Not specified'}`,
+      `Verification Method: ${verifyMethodNames[verifyMethod] || verifyMethod}`,
+      `Verification Code: ${verifyCode}`,
+      '',
+      notes ? `Notes: ${notes}` : '',
+      '',
+      '--- AGENT INSTRUCTIONS ---',
+      `1. Verify code ${verifyCode} is present on the seller's store using method: ${verifyMethod}`,
+      '2. Do NOT begin any scraping or import until verification is confirmed',
+      '3. Once verified, begin catalog import with seller approval',
+      '4. Report progress through the messaging system',
+    ].join('\n');
+
+    const mailId = storeInboundEmail({
+      from: userEmail,
+      fromName: storeName,
+      to: 'verify@borealisterminal.com',
+      subject,
+      bodyText,
+      source: 'migration-request',
+    });
+
+    // ─── Also store in migration_requests table if it exists ──────────
+    try {
+      const db = getDb();
+      db.prepare(`
+        CREATE TABLE IF NOT EXISTS migration_requests (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          platform TEXT NOT NULL,
+          store_url TEXT NOT NULL,
+          store_name TEXT NOT NULL,
+          listing_count TEXT,
+          notes TEXT,
+          verify_method TEXT NOT NULL,
+          verify_code TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending_verification',
+          admin_mail_id TEXT,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        )
+      `).run();
+
+      const reqId = uuid();
+      db.prepare(`
+        INSERT INTO migration_requests (id, user_id, platform, store_url, store_name, listing_count, notes, verify_method, verify_code, status, admin_mail_id, created_at, updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+      `).run(
+        reqId, userId, platform, storeUrl, storeName,
+        listingCount || null, notes || null,
+        verifyMethod, verifyCode,
+        'pending_verification', mailId,
+        now, now,
+      );
+
+      logger.info('Migration request stored', { reqId, userId, platform, verifyCode });
+
+      res.json({
+        success: true,
+        data: {
+          requestId: reqId,
+          status: 'pending_verification',
+          verifyCode,
+          message: 'Your migration request has been submitted. Our AI agent will verify your store ownership and begin the import process.',
+        },
+      });
+    } catch (dbErr: any) {
+      // Even if DB table creation fails, the admin mail was stored
+      logger.error('Failed to store migration request in DB', { error: dbErr.message });
+      res.json({
+        success: true,
+        data: {
+          requestId: mailId,
+          status: 'queued',
+          verifyCode,
+          message: 'Your migration request has been queued for processing.',
+        },
+      });
+    }
+  } catch (err: any) {
+    logger.error('Migration request error', { error: err.message });
+    res.status(500).json({ success: false, error: 'Failed to submit migration request' });
   }
 });
 

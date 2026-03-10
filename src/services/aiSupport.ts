@@ -366,6 +366,20 @@ Your capabilities:
 - Explain marketplace escrow and trust bonds
 - Discuss API integration and developer documentation
 - Handle subscription and billing inquiries
+- Process store migration requests and verify ownership codes
+- Handle verification emails sent to verify@borealisterminal.com
+
+STORE MIGRATION & VERIFICATION:
+When you receive emails to verify@borealisterminal.com or messages about store migration:
+- Users submit migration requests with a verification code (format: BT-XXXXXXXX)
+- The verification code must be placed on the seller's store via one of 3 methods:
+  1. Meta Tag / Store Description — seller adds the BT-XXXXXXXX code to their store description or HTML meta tag
+  2. Verification Listing — seller creates a $0 test listing titled "BorealisTerminal-Verify-BT-XXXXXXXX"
+  3. Email Verification — seller sends the code from their store-registered email to verify@borealisterminal.com
+- NEVER begin any scraping or import activity until ownership is verified
+- If verification fails, notify the seller and request they try again
+- Upon successful verification, update the request status and begin catalog import
+- Always log verification attempts and results for audit trail
 
 Important rules:
 - NEVER share API keys, admin passwords, server IPs, or internal architecture
@@ -575,16 +589,32 @@ export interface InboundEmail {
 }
 
 export async function processInboundEmail(email: InboundEmail): Promise<string> {
+  // Check if this is a verification email sent to verify@borealisterminal.com
+  const isVerificationEmail = email.to?.toLowerCase().includes('verify@borealisterminal.com');
+  const verifyCodeMatch = (email.body || '').match(/BT-[A-Z0-9]{8}/);
+
+  if (isVerificationEmail && verifyCodeMatch) {
+    logger.info('Migration verification email received', {
+      from: email.from,
+      verifyCode: verifyCodeMatch[0],
+    });
+  }
+
   // Create a session ID from the sender's email for conversation continuity
   const sessionId = `email-${email.from.toLowerCase().replace(/[^a-z0-9]/g, '-')}`;
 
   // Build the message with email context
+  const contextPrefix = isVerificationEmail
+    ? `[MIGRATION VERIFICATION EMAIL — sent to verify@borealisterminal.com]\n`
+    : '';
+
   const message = [
+    contextPrefix,
     `Subject: ${email.subject}`,
     email.fromName ? `From: ${email.fromName} <${email.from}>` : `From: ${email.from}`,
     `---`,
     email.body || '(no body)',
-  ].join('\n');
+  ].filter(Boolean).join('\n');
 
   const result = await handleSupportChat({
     sessionId,
@@ -616,7 +646,11 @@ async function sendBusinessEscalationEmail(
   }
 
   const resend = new Resend(apiKey);
-  const fromAddr = process.env.EMAIL_FROM ?? 'BorealisMark <support@borealisprotocol.ai>';
+  // CRITICAL: Never send from .workers.dev or .pages.dev domains
+  let fromAddr = process.env.EMAIL_FROM ?? 'BorealisMark <support@borealisprotocol.ai>';
+  if (fromAddr.includes('.workers.dev') || fromAddr.includes('.pages.dev') || fromAddr.includes('cloudflare.dev')) {
+    fromAddr = 'BorealisMark <support@borealisprotocol.ai>';
+  }
 
   const html = `<!DOCTYPE html>
 <html>

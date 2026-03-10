@@ -10,8 +10,14 @@
 import { Resend } from 'resend';
 import { logger } from '../middleware/logger';
 
-// Use verified custom domain for outbound email
+// CRITICAL: Use verified custom domain for outbound email — NEVER *.cloudflare.dev or *.workers.dev
 const FROM_ADDRESS = process.env.EMAIL_FROM ?? 'BorealisMark <support@borealisprotocol.ai>';
+
+// Safety: validate FROM address at startup — block .dev domains
+if (FROM_ADDRESS.includes('.workers.dev') || FROM_ADDRESS.includes('.pages.dev') || FROM_ADDRESS.includes('cloudflare.dev')) {
+  logger.error('FATAL: EMAIL_FROM is set to a .dev domain — emails must use a verified branded domain');
+  throw new Error('EMAIL_FROM must not use .workers.dev, .pages.dev, or cloudflare.dev domains');
+}
 
 let resend: Resend | null = null;
 

@@ -129,8 +129,14 @@ function initMailSchema(): void {
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
+// CRITICAL: Outbound emails MUST use verified branded domains — NEVER *.cloudflare.dev or *.workers.dev
 const FROM_ADDRESS = process.env.EMAIL_FROM ?? 'BorealisMark <support@borealisprotocol.ai>';
 const ADMIN_EMAIL = process.env.ADMIN_NOTIFICATION_EMAIL ?? 'esimon.ng@gmail.com';
+
+// Safety check on FROM address
+if (FROM_ADDRESS.includes('.workers.dev') || FROM_ADDRESS.includes('.pages.dev') || FROM_ADDRESS.includes('cloudflare.dev')) {
+  throw new Error('EMAIL_FROM must not use .workers.dev, .pages.dev, or cloudflare.dev domains');
+}
 
 function makeSnippet(text: string, maxLen = 120): string {
   const clean = text.replace(/\s+/g, ' ').trim();
