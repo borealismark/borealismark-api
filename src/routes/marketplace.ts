@@ -42,7 +42,7 @@ import { z } from 'zod';
 import { v4 as uuid } from 'uuid';
 import { requireAuth, type AuthRequest } from './auth';
 import { logger } from '../middleware/logger';
-import { getDb, createStorefront, getStorefrontBySlug, getStorefrontByUserId, updateStorefront, getUserSanction, addViolation, upsertUserSanction, getViolationCount, getUserViolations, getAllViolations, getAllSanctions } from '../db/database';
+import { getDb, createStorefront, getStorefrontBySlug, getStorefrontByUserId, updateStorefront, getUserSanction, addViolation, upsertUserSanction, getViolationCount, getUserViolations, getAllViolations, getAllSanctions, getUserTrustLevel, computeAndStoreTrustScore } from '../db/database';
 import {
   USDC_TOKEN_ID,
   TREASURY_ACCOUNT_ID,
@@ -367,6 +367,7 @@ router.get('/listings', async (req: Request, res: Response) => {
           sellerId: l.user_id,
           sellerTier: l.seller_tier || 'standard',
           sellerVerified: l.seller_tier === 'pro' || l.seller_tier === 'elite',
+          sellerTrustLevel: getUserTrustLevel(l.user_id),
           sellerAge: Math.floor((Date.now() - (l.seller_created_at || Date.now())) / (1000 * 60 * 60 * 24)),
           likeCount: l.like_count || 0,
           viewCount: l.view_count,
@@ -480,6 +481,7 @@ router.get('/listings/:id', async (req: Request, res: Response) => {
         sellerName: listing.seller_name,
         sellerTier: listing.seller_tier || 'standard',
         sellerVerified: listing.seller_tier === 'pro' || listing.seller_tier === 'elite',
+        sellerTrustLevel: getUserTrustLevel(listing.user_id),
         sellerMemberSince: listing.seller_created_at,
         sellerStoreSlug: storefront?.slug,
         sellerStoreName: storefront?.store_name,

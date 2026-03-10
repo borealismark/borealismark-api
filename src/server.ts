@@ -26,6 +26,7 @@ import supportRouter from './routes/support';
 import analyticsRouter from './routes/analytics';
 import adminRouter from './routes/admin';
 import adminMailRouter from './routes/adminMail';
+import verificationRouter from './routes/verification';
 import imagesRouter from './routes/images';
 import { cleanupExpiredInvoices } from './hedera/usdc';
 import { validateHederaConfig, logHealthCheckResults } from './hedera/healthcheck';
@@ -201,6 +202,7 @@ app.use('/v1/support',  supportRouter);
 app.use('/v1/analytics', analyticsRouter);
 app.use('/v1/admin',     adminRouter);
 app.use('/v1/admin/mail', adminMailRouter);
+app.use('/v1/verification', verificationRouter);
 
 // ─── Static Files (Dashboard) ────────────────────────────────────────────────
 

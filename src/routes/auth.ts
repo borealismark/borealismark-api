@@ -33,6 +33,7 @@ import { logger } from '../middleware/logger';
 import { authLimiter, passwordResetLimiter } from '../middleware/rateLimiter';
 import { events as eventBus } from '../services/eventBus';
 import { sendPasswordResetEmail, sendVerificationEmail } from '../services/email';
+import { computeAndStoreTrustScore, getTrustScore } from '../db/database';
 
 const router = Router();
 
@@ -310,6 +311,9 @@ router.get('/me', requireAuth, (req: Request, res: Response) => {
     standard: null, pro: 'pro', elite: 'elite', platinum: 'trusted-seller', sovereign: 'sovereign',
   };
 
+  // Compute trust score on profile fetch
+  const trustScore = computeAndStoreTrustScore(user.id);
+
   res.json({
     success: true,
     data: {
@@ -323,6 +327,8 @@ router.get('/me', requireAuth, (req: Request, res: Response) => {
       createdAt: user.createdAt,
       lastLoginAt: user.lastLoginAt,
       emailVerified: user.emailVerified,
+      trustScore: trustScore.totalScore,
+      trustLevel: trustScore.trustLevel,
     },
   });
 });
@@ -499,7 +505,10 @@ router.post('/verify-email', async (req: Request, res: Response) => {
     // Mark token as used (one-time)
     markPasswordResetTokenUsed(record.id);
 
-    logger.info('Email verified', { userId: user.id, email: user.email });
+    // Recompute trust score with email now verified
+    const trustScore = computeAndStoreTrustScore(user.id);
+
+    logger.info('Email verified', { userId: user.id, email: user.email, trustScore: trustScore.totalScore });
 
     // Issue a fresh JWT so the frontend can update immediately
     const jwtToken = signToken(user.id, user.email, user.tier, user.role);
@@ -516,6 +525,8 @@ router.post('/verify-email', async (req: Request, res: Response) => {
           tier: user.tier,
           role: user.role,
           emailVerified: true,
+          trustScore: trustScore.totalScore,
+          trustLevel: trustScore.trustLevel,
         },
       },
     });

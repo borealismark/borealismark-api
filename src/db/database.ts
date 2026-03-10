@@ -927,6 +927,51 @@ function initSchema(db: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_bot_reviews_bot ON bot_reviews(bot_id);
     CREATE INDEX IF NOT EXISTS idx_bot_reviews_reviewer ON bot_reviews(reviewer_id);
+
+    -- ── User Verifications (multi-layer trust stacking) ─────────────────────────
+    -- Each row represents one verification layer for a user.
+    -- Layers: email (auto), social_media, government_id
+    -- Trust score = sum of layer weights. More layers = higher trust.
+    CREATE TABLE IF NOT EXISTS user_verifications (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      verification_type TEXT NOT NULL,    -- 'email' | 'social_media' | 'government_id'
+      platform TEXT,                       -- 'facebook' | 'linkedin' | 'x' | 'instagram' | 'tiktok' | 'government_id'
+      verification_code TEXT,              -- BT-XXXXXXXX code for social verification
+      profile_url TEXT,                    -- social media profile URL or document reference
+      status TEXT NOT NULL DEFAULT 'pending',  -- 'pending' | 'verified' | 'rejected' | 'expired'
+      trust_points INTEGER NOT NULL DEFAULT 0, -- points this layer contributes
+      metadata TEXT NOT NULL DEFAULT '{}', -- JSON: extra data (doc analysis, social proof, etc.)
+      reviewer_id TEXT,                    -- admin who reviewed (for govt ID)
+      review_notes TEXT,                   -- admin review notes
+      submitted_at INTEGER NOT NULL,
+      verified_at INTEGER,
+      expires_at INTEGER,                  -- optional expiry for social verifications
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_verifications_user ON user_verifications(user_id);
+    CREATE INDEX IF NOT EXISTS idx_verifications_status ON user_verifications(status);
+    CREATE INDEX IF NOT EXISTS idx_verifications_type ON user_verifications(verification_type);
+    CREATE INDEX IF NOT EXISTS idx_verifications_code ON user_verifications(verification_code);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_verifications_user_platform ON user_verifications(user_id, platform) WHERE status != 'rejected';
+
+    -- ── User Trust Scores (pre-computed aggregate) ──────────────────────────────
+    -- Updated whenever a verification layer changes. Single source of truth for trust level.
+    CREATE TABLE IF NOT EXISTS user_trust_scores (
+      user_id TEXT PRIMARY KEY,
+      total_score INTEGER NOT NULL DEFAULT 0,
+      trust_level TEXT NOT NULL DEFAULT 'unverified', -- 'unverified' | 'basic' | 'verified' | 'trusted' | 'premium'
+      email_verified INTEGER NOT NULL DEFAULT 0,
+      social_verified INTEGER NOT NULL DEFAULT 0,       -- count of verified social accounts
+      document_verified INTEGER NOT NULL DEFAULT 0,
+      transaction_count INTEGER NOT NULL DEFAULT 0,
+      account_age_days INTEGER NOT NULL DEFAULT 0,
+      last_computed_at INTEGER NOT NULL,
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    );
   `);
 
   // Migrate: add CAD pricing + shipping columns to marketplace_listings
@@ -3416,4 +3461,265 @@ export function getAdminDashboardStats(): Record<string, any> {
     marketplace: { listings: totalListings, published: publishedListings, orders: totalOrders, revenueUsdc: revenue.total },
     protocol: { agents: totalAgents, certificates: totalCertificates },
   };
+}
+
+// ─── User Verification Queries (Trust Layer System) ─────────────────────────
+
+export interface VerificationRecord {
+  id: string;
+  userId: string;
+  verificationType: string;
+  platform: string | null;
+  verificationCode: string | null;
+  profileUrl: string | null;
+  status: string;
+  trustPoints: number;
+  metadata: string;
+  reviewerId: string | null;
+  reviewNotes: string | null;
+  submittedAt: number;
+  verifiedAt: number | null;
+  expiresAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface TrustScoreRecord {
+  userId: string;
+  totalScore: number;
+  trustLevel: string;
+  emailVerified: number;
+  socialVerified: number;
+  documentVerified: number;
+  transactionCount: number;
+  accountAgeDays: number;
+  lastComputedAt: number;
+}
+
+// Trust points configuration
+export const TRUST_POINTS = {
+  EMAIL_VERIFIED: 10,
+  SOCIAL_MEDIA: 15,        // per verified social account
+  SOCIAL_MEDIA_MAX: 45,    // max 3 social accounts counted
+  GOVERNMENT_ID: 30,
+  ACCOUNT_AGE_30D: 5,      // bonus for 30+ day old account
+  ACCOUNT_AGE_90D: 10,     // bonus for 90+ day old account
+  ACCOUNT_AGE_180D: 15,    // bonus for 180+ day old account
+  TRANSACTION_BONUS: 2,    // per completed transaction (max 20 pts = 10 transactions)
+  TRANSACTION_MAX: 20,
+} as const;
+
+// Trust level thresholds
+export const TRUST_LEVELS: Array<{ minScore: number; level: string }> = [
+  { minScore: 0,   level: 'unverified' },
+  { minScore: 10,  level: 'basic' },       // email only
+  { minScore: 25,  level: 'verified' },     // email + 1 social
+  { minScore: 50,  level: 'trusted' },      // email + social + govt OR multiple socials
+  { minScore: 80,  level: 'premium' },      // all layers + history
+];
+
+function mapVerificationRow(row: any): VerificationRecord {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    verificationType: row.verification_type,
+    platform: row.platform,
+    verificationCode: row.verification_code,
+    profileUrl: row.profile_url,
+    status: row.status,
+    trustPoints: row.trust_points,
+    metadata: row.metadata,
+    reviewerId: row.reviewer_id,
+    reviewNotes: row.review_notes,
+    submittedAt: row.submitted_at,
+    verifiedAt: row.verified_at,
+    expiresAt: row.expires_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function mapTrustScoreRow(row: any): TrustScoreRecord {
+  return {
+    userId: row.user_id,
+    totalScore: row.total_score,
+    trustLevel: row.trust_level,
+    emailVerified: row.email_verified,
+    socialVerified: row.social_verified,
+    documentVerified: row.document_verified,
+    transactionCount: row.transaction_count,
+    accountAgeDays: row.account_age_days,
+    lastComputedAt: row.last_computed_at,
+  };
+}
+
+export function createVerification(params: {
+  id: string;
+  userId: string;
+  verificationType: string;
+  platform?: string;
+  verificationCode?: string;
+  profileUrl?: string;
+  trustPoints?: number;
+  metadata?: string;
+}): void {
+  const db = getDb();
+  const now = Date.now();
+  db.prepare(`
+    INSERT INTO user_verifications (id, user_id, verification_type, platform, verification_code, profile_url, status, trust_points, metadata, submitted_at, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)
+  `).run(
+    params.id,
+    params.userId,
+    params.verificationType,
+    params.platform || null,
+    params.verificationCode || null,
+    params.profileUrl || null,
+    params.trustPoints || 0,
+    params.metadata || '{}',
+    now, now, now,
+  );
+}
+
+export function getVerificationsByUser(userId: string): VerificationRecord[] {
+  const db = getDb();
+  const rows = db.prepare('SELECT * FROM user_verifications WHERE user_id = ? ORDER BY created_at DESC').all(userId) as any[];
+  return rows.map(mapVerificationRow);
+}
+
+export function getVerificationById(id: string): VerificationRecord | null {
+  const db = getDb();
+  const row = db.prepare('SELECT * FROM user_verifications WHERE id = ?').get(id) as any;
+  return row ? mapVerificationRow(row) : null;
+}
+
+export function getVerificationByCode(code: string): VerificationRecord | null {
+  const db = getDb();
+  const row = db.prepare("SELECT * FROM user_verifications WHERE verification_code = ? AND status = 'pending'").get(code) as any;
+  return row ? mapVerificationRow(row) : null;
+}
+
+export function getActiveVerification(userId: string, platform: string): VerificationRecord | null {
+  const db = getDb();
+  const row = db.prepare(
+    "SELECT * FROM user_verifications WHERE user_id = ? AND platform = ? AND status IN ('pending', 'verified') ORDER BY created_at DESC LIMIT 1"
+  ).get(userId, platform) as any;
+  return row ? mapVerificationRow(row) : null;
+}
+
+export function updateVerificationStatus(
+  id: string,
+  status: 'verified' | 'rejected' | 'expired',
+  opts?: { reviewerId?: string; reviewNotes?: string; trustPoints?: number }
+): void {
+  const db = getDb();
+  const now = Date.now();
+  db.prepare(`
+    UPDATE user_verifications
+    SET status = ?, verified_at = ?, reviewer_id = ?, review_notes = ?, trust_points = COALESCE(?, trust_points), updated_at = ?
+    WHERE id = ?
+  `).run(
+    status,
+    status === 'verified' ? now : null,
+    opts?.reviewerId || null,
+    opts?.reviewNotes || null,
+    opts?.trustPoints ?? null,
+    now,
+    id,
+  );
+}
+
+export function getPendingVerifications(type?: string): VerificationRecord[] {
+  const db = getDb();
+  let sql = "SELECT * FROM user_verifications WHERE status = 'pending'";
+  const params: any[] = [];
+  if (type) {
+    sql += ' AND verification_type = ?';
+    params.push(type);
+  }
+  sql += ' ORDER BY submitted_at ASC';
+  const rows = db.prepare(sql).all(...params) as any[];
+  return rows.map(mapVerificationRow);
+}
+
+// ── Trust Score Computation ─────────────────────────────────────────────────
+
+export function computeAndStoreTrustScore(userId: string): TrustScoreRecord {
+  const db = getDb();
+  const now = Date.now();
+
+  // 1. Email verification
+  const user = db.prepare('SELECT email_verified, created_at FROM users WHERE id = ?').get(userId) as any;
+  const emailVerified = user?.email_verified ? 1 : 0;
+  let totalScore = emailVerified ? TRUST_POINTS.EMAIL_VERIFIED : 0;
+
+  // 2. Social media verifications
+  const socialCount = (db.prepare(
+    "SELECT COUNT(*) as cnt FROM user_verifications WHERE user_id = ? AND verification_type = 'social_media' AND status = 'verified'"
+  ).get(userId) as any).cnt;
+  const socialPoints = Math.min(socialCount * TRUST_POINTS.SOCIAL_MEDIA, TRUST_POINTS.SOCIAL_MEDIA_MAX);
+  totalScore += socialPoints;
+
+  // 3. Government ID verification
+  const docVerified = (db.prepare(
+    "SELECT COUNT(*) as cnt FROM user_verifications WHERE user_id = ? AND verification_type = 'government_id' AND status = 'verified'"
+  ).get(userId) as any).cnt;
+  if (docVerified > 0) totalScore += TRUST_POINTS.GOVERNMENT_ID;
+
+  // 4. Account age bonus
+  const accountAgeDays = user ? Math.floor((now - user.created_at) / (24 * 60 * 60 * 1000)) : 0;
+  if (accountAgeDays >= 180) totalScore += TRUST_POINTS.ACCOUNT_AGE_180D;
+  else if (accountAgeDays >= 90) totalScore += TRUST_POINTS.ACCOUNT_AGE_90D;
+  else if (accountAgeDays >= 30) totalScore += TRUST_POINTS.ACCOUNT_AGE_30D;
+
+  // 5. Transaction history bonus
+  const txCount = (db.prepare(
+    "SELECT COUNT(*) as cnt FROM marketplace_orders WHERE (buyer_id = ? OR seller_id = ?) AND status IN ('completed', 'settled')"
+  ).get(userId, userId) as any).cnt;
+  const txPoints = Math.min(txCount * TRUST_POINTS.TRANSACTION_BONUS, TRUST_POINTS.TRANSACTION_MAX);
+  totalScore += txPoints;
+
+  // Determine trust level
+  let trustLevel = 'unverified';
+  for (const tl of TRUST_LEVELS) {
+    if (totalScore >= tl.minScore) trustLevel = tl.level;
+  }
+
+  // Upsert trust score
+  db.prepare(`
+    INSERT INTO user_trust_scores (user_id, total_score, trust_level, email_verified, social_verified, document_verified, transaction_count, account_age_days, last_computed_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(user_id) DO UPDATE SET
+      total_score = excluded.total_score,
+      trust_level = excluded.trust_level,
+      email_verified = excluded.email_verified,
+      social_verified = excluded.social_verified,
+      document_verified = excluded.document_verified,
+      transaction_count = excluded.transaction_count,
+      account_age_days = excluded.account_age_days,
+      last_computed_at = excluded.last_computed_at
+  `).run(userId, totalScore, trustLevel, emailVerified, socialCount, docVerified > 0 ? 1 : 0, txCount, accountAgeDays, now);
+
+  return {
+    userId,
+    totalScore,
+    trustLevel,
+    emailVerified,
+    socialVerified: socialCount,
+    documentVerified: docVerified > 0 ? 1 : 0,
+    transactionCount: txCount,
+    accountAgeDays,
+    lastComputedAt: now,
+  };
+}
+
+export function getTrustScore(userId: string): TrustScoreRecord | null {
+  const db = getDb();
+  const row = db.prepare('SELECT * FROM user_trust_scores WHERE user_id = ?').get(userId) as any;
+  return row ? mapTrustScoreRow(row) : null;
+}
+
+export function getUserTrustLevel(userId: string): string {
+  const score = getTrustScore(userId);
+  return score?.trustLevel ?? 'unverified';
 }
