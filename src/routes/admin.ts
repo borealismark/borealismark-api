@@ -19,6 +19,9 @@
 import { Router, type Request, type Response } from 'express';
 import { z } from 'zod';
 import { v4 as uuid } from 'uuid';
+import path from 'path';
+import { execSync } from 'child_process';
+import { existsSync, statSync } from 'fs';
 import { requireAuth } from './auth';
 import { logger } from '../middleware/logger';
 import {
@@ -39,6 +42,7 @@ import {
   getEventStats,
 } from '../db/database';
 import { handleSupportChat } from '../services/aiSupport';
+import { uploadDatabaseBackup, isR2Enabled, getR2Status } from '../services/r2Storage';
 
 const router = Router();
 
@@ -330,6 +334,89 @@ router.get('/events/stats', requireAuth, requireAdmin, (req: Request, res: Respo
     logger.error('Admin event stats error', { error: err.message });
     res.status(500).json({ success: false, error: 'Failed to load event stats' });
   }
+});
+
+// ─── POST /backup — Create database backup and upload to R2 ─────────────────
+
+router.post('/backup', requireAuth, requireAdmin, async (req: Request, res: Response) => {
+  try {
+    if (!isR2Enabled()) {
+      return res.status(503).json({
+        success: false,
+        error: 'R2 storage is not configured. Set R2_* environment variables to enable backups.',
+        r2Status: getR2Status(),
+      });
+    }
+
+    const db = getDb();
+    const dbPath = process.env.DB_PATH ?? path.join(process.cwd(), 'borealismark.db');
+
+    if (!existsSync(dbPath)) {
+      return res.status(500).json({
+        success: false,
+        error: 'Database file not found at expected path.',
+      });
+    }
+
+    // Create a backup copy using SQLite's backup API (safe for WAL mode)
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
+    const backupPath = path.join('/tmp', `borealismark-backup-${timestamp}.db`);
+
+    // Use SQLite VACUUM INTO for a clean, consistent backup
+    db.exec(`VACUUM INTO '${backupPath}'`);
+
+    // Compress the backup
+    const compressedPath = `${backupPath}.gz`;
+    execSync(`gzip -c "${backupPath}" > "${compressedPath}"`);
+
+    const backupStats = statSync(compressedPath);
+    logger.info('Database backup created', {
+      originalSize: statSync(backupPath).size,
+      compressedSize: backupStats.size,
+      path: compressedPath,
+    });
+
+    // Upload to R2
+    const result = await uploadDatabaseBackup(compressedPath, `borealismark-${timestamp}.db.gz`);
+
+    // Clean up temp files
+    try {
+      execSync(`rm -f "${backupPath}" "${compressedPath}"`);
+    } catch { /* best effort cleanup */ }
+
+    logger.info('Database backup uploaded to R2', {
+      key: result.key,
+      size: result.size,
+      url: result.url,
+    });
+
+    res.json({
+      success: true,
+      data: {
+        key: result.key,
+        size: result.size,
+        sizeHuman: `${(result.size / 1024 / 1024).toFixed(2)} MB`,
+        url: result.url,
+        createdAt: Date.now(),
+      },
+    });
+  } catch (err: any) {
+    logger.error('Database backup failed', { error: err.message });
+    res.status(500).json({
+      success: false,
+      error: 'Database backup failed',
+      details: err.message,
+    });
+  }
+});
+
+// ─── GET /r2-status — Check R2 storage configuration ────────────────────────
+
+router.get('/r2-status', requireAuth, requireAdmin, (_req: Request, res: Response) => {
+  res.json({
+    success: true,
+    data: getR2Status(),
+  });
 });
 
 export default router;

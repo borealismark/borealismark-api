@@ -810,3 +810,188 @@ export async function sendAdminSubscriptionNotification(
     return false;
   }
 }
+
+/**
+ * Notify the platform admin when a user submits a government ID for verification.
+ */
+export async function sendAdminVerificationNotification(
+  userEmail: string,
+  userName: string,
+  userId: string,
+  documentType: string,
+  verificationId: string,
+): Promise<boolean> {
+  const timestamp = new Date().toLocaleString('en-US', { timeZone: 'America/Toronto' });
+
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0C0D10; color: #E0E0E0; }
+    .container { max-width: 560px; margin: 40px auto; padding: 0 20px; }
+    .card { background: #16171C; border: 1px solid #2A2B33; border-radius: 12px; padding: 32px; }
+    .logo { color: #D4A853; font-size: 20px; font-weight: 700; margin-bottom: 20px; }
+    h1 { font-size: 20px; font-weight: 600; color: #FFA500; margin: 0 0 16px 0; }
+    p { font-size: 15px; line-height: 1.6; color: #A0A0A0; margin: 0 0 12px 0; }
+    .detail { font-size: 14px; color: #888; margin: 6px 0; }
+    .detail strong { color: #CCC; }
+    .highlight { color: #D4A853; font-weight: 600; }
+    .divider { border-top: 1px solid #2A2B33; margin: 20px 0; }
+    .footer { text-align: center; padding: 20px 0; font-size: 12px; color: #555; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="card">
+      <div class="logo">BorealisMark Admin</div>
+      <h1>New Verification Request</h1>
+      <p>A user has submitted a government ID for verification. Action required.</p>
+      <div class="divider"></div>
+      <p class="detail"><strong>User:</strong> <span class="highlight">${userName}</span></p>
+      <p class="detail"><strong>Email:</strong> ${userEmail}</p>
+      <p class="detail"><strong>Document Type:</strong> ${documentType}</p>
+      <p class="detail"><strong>Verification ID:</strong> <span style="font-family:monospace;font-size:12px">${verificationId}</span></p>
+      <p class="detail"><strong>User ID:</strong> <span style="font-family:monospace;font-size:12px">${userId}</span></p>
+      <p class="detail"><strong>Submitted:</strong> ${timestamp}</p>
+      <div class="divider"></div>
+      <p class="detail" style="color:#666">Review and approve or reject in the admin dashboard.</p>
+    </div>
+    <div class="footer">&copy; ${new Date().getFullYear()} BorealisMark Protocol — Admin Notification</div>
+  </div>
+</body>
+</html>`;
+
+  const text = `New Verification Request\n\nUser: ${userName}\nEmail: ${userEmail}\nDocument Type: ${documentType}\nVerification ID: ${verificationId}\nUser ID: ${userId}\nSubmitted: ${timestamp}\n\nAction required: Review and approve or reject in the admin dashboard.`;
+
+  if (!process.env.RESEND_API_KEY) {
+    logger.info('Admin verification notification (NOT SENT — no RESEND_API_KEY)', {
+      to: ADMIN_EMAIL, userEmail, userName, userId, documentType, verificationId,
+    });
+    return true;
+  }
+
+  try {
+    const result = await getResend().emails.send({
+      from: FROM_ADDRESS,
+      to: [ADMIN_EMAIL],
+      subject: `Verification Request: ${userName} (${documentType})`,
+      html,
+      text,
+    });
+    if (result.error) {
+      logger.error('Admin verification notification send failed', { error: result.error });
+      return false;
+    }
+    logger.info('Admin verification notification sent', { to: ADMIN_EMAIL, userEmail, verificationId });
+    return true;
+  } catch (err: any) {
+    logger.error('Admin verification notification error', { error: err.message });
+    return false;
+  }
+}
+
+/**
+ * Notify the user when their verification is approved or rejected.
+ */
+export async function sendVerificationResultEmail(
+  toEmail: string,
+  userName: string,
+  approved: boolean,
+  verificationType: string,
+  reason?: string,
+): Promise<boolean> {
+  const timestamp = new Date().toLocaleString('en-US', { timeZone: 'America/Toronto' });
+  const headingColor = approved ? '#4CAF50' : '#FFA500';
+  const headingText = approved ? 'Verification Approved' : 'Verification Update';
+
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background: #0C0D10; color: #E0E0E0; }
+    .container { max-width: 560px; margin: 40px auto; padding: 0 20px; }
+    .card { background: #16171C; border: 1px solid #2A2B33; border-radius: 12px; padding: 40px 32px; }
+    .logo { color: #D4A853; font-size: 20px; font-weight: 700; letter-spacing: -0.5px; margin-bottom: 24px; }
+    h1 { font-size: 22px; font-weight: 600; color: ${headingColor}; margin: 0 0 16px 0; }
+    p { font-size: 15px; line-height: 1.6; color: #A0A0A0; margin: 0 0 16px 0; }
+    .highlight { color: #D4A853; font-weight: 600; }
+    .divider { border-top: 1px solid #2A2B33; margin: 24px 0; }
+    .detail { font-size: 14px; color: #888; margin: 6px 0; }
+    .detail strong { color: #CCC; }
+    .badge { display: inline-block; padding: 6px 14px; border-radius: 6px; font-weight: 600; font-size: 14px; background: ${headingColor}22; color: ${headingColor}; border: 1px solid ${headingColor}44; }
+    .reason-box { background: rgba(255,165,0,0.08); border: 1px solid rgba(255,165,0,0.2); border-radius: 8px; padding: 16px; margin: 16px 0; }
+    .reason-box p { color: #A0A0A0; margin: 0; font-size: 14px; }
+    .small { font-size: 13px; color: #666; }
+    .footer { text-align: center; padding: 24px 0; font-size: 12px; color: #555; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="card">
+      <div class="logo">BorealisMark</div>
+      <h1>${headingText}</h1>
+      ${approved
+        ? `<p>Hi ${userName || 'there'},</p>
+           <p>Congratulations! Your <strong style="color:#fff">${verificationType}</strong> verification has been approved.</p>
+           <div class="divider"></div>
+           <p class="detail"><strong>Verification Type:</strong> ${verificationType}</p>
+           <p class="detail"><strong>Status:</strong> <span class="badge">APPROVED</span></p>
+           <p class="detail"><strong>Approved:</strong> ${timestamp}</p>
+           <div class="divider"></div>
+           <p>Your verification is now active. You have earned <span class="highlight">10 trust points</span> for completing this verification. These points contribute to your BorealisMark Score and unlock additional marketplace features.</p>
+           <p>Thank you for verifying your identity on BorealisMark.</p>`
+        : `<p>Hi ${userName || 'there'},</p>
+           <p>Your <strong style="color:#fff">${verificationType}</strong> verification could not be approved at this time.</p>
+           <div class="divider"></div>
+           <p class="detail"><strong>Verification Type:</strong> ${verificationType}</p>
+           <p class="detail"><strong>Status:</strong> <span class="badge">UPDATE REQUIRED</span></p>
+           ${reason ? `<div class="reason-box"><p><strong style="color:#FFA500">Reason:</strong> ${reason}</p></div>` : ''}
+           <p>Please review the feedback above and resubmit your verification. You can try again at any time in your account settings.</p>`
+      }
+    </div>
+    <div class="footer">
+      &copy; ${new Date().getFullYear()} BorealisMark Protocol &mdash; AI Trust Certification
+    </div>
+  </div>
+</body>
+</html>`;
+
+  const text = approved
+    ? `Verification Approved\n\nHi ${userName || 'there'},\n\nCongratulations! Your ${verificationType} verification has been approved.\n\nVerification Type: ${verificationType}\nStatus: APPROVED\nApproved: ${timestamp}\n\nYou have earned 10 trust points for completing this verification.\n\n— BorealisMark Protocol`
+    : `Verification Update\n\nHi ${userName || 'there'},\n\nYour ${verificationType} verification could not be approved at this time.\n\nVerification Type: ${verificationType}\nStatus: UPDATE REQUIRED\n${reason ? `Reason: ${reason}\n` : ''}\nPlease resubmit your verification in your account settings.\n\n— BorealisMark Protocol`;
+
+  if (!process.env.RESEND_API_KEY) {
+    logger.info(`Verification result email (NOT SENT — no RESEND_API_KEY): ${approved ? 'approved' : 'rejected'}`, {
+      to: toEmail,
+      userName,
+      verificationType,
+    });
+    return true;
+  }
+
+  try {
+    const result = await getResend().emails.send({
+      from: FROM_ADDRESS,
+      to: [toEmail],
+      subject: `Verification ${approved ? 'Approved' : 'Update'} — BorealisMark`,
+      html,
+      text,
+    });
+
+    if (result.error) {
+      logger.error('Verification result email send failed', { error: result.error, to: toEmail });
+      return false;
+    }
+
+    logger.info('Verification result email sent', { to: toEmail, approved, verificationType, id: result.data?.id });
+    return true;
+  } catch (err: any) {
+    logger.error('Verification result email error', { error: err.message, to: toEmail });
+    return false;
+  }
+}

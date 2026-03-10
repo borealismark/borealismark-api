@@ -38,6 +38,8 @@ import {
   TRUST_POINTS,
   TRUST_LEVELS,
 } from '../db/database';
+import { uploadToR2, isR2Enabled } from '../services/r2Storage';
+import { sendAdminVerificationNotification } from '../services/email';
 
 const router = Router();
 
@@ -358,18 +360,59 @@ router.post('/document/upload', requireAuth, async (req: Request, res: Response)
     }
 
     const id = uuid();
+    let documentStorageKey: string | null = null;
+    let selfieStorageKey: string | null = null;
 
-    // Store document metadata (NOT the actual image in DB — in production, use S3/R2)
-    // For now, we store a truncated hash reference and the image analysis results
+    // Upload documents to R2 if configured
+    if (isR2Enabled()) {
+      try {
+        // Parse base64 data
+        const docBase64 = documentImageBase64.replace(/^data:image\/\w+;base64,/, '');
+        const docBuffer = Buffer.from(docBase64, 'base64');
+        const docExt = documentImageBase64.match(/^data:image\/(\w+);/)?.[1] || 'jpg';
+        const docKey = `gov-id/${userId}/${id}-document.${docExt}`;
+
+        const docResult = await uploadToR2('documents', {
+          data: docBuffer,
+          key: docKey,
+          contentType: `image/${docExt}`,
+          metadata: { userId, verificationId: id, type: 'document' },
+        });
+        documentStorageKey = docResult.key;
+
+        if (selfieImageBase64) {
+          const selfieBase64 = selfieImageBase64.replace(/^data:image\/\w+;base64,/, '');
+          const selfieBuffer = Buffer.from(selfieBase64, 'base64');
+          const selfieExt = selfieImageBase64.match(/^data:image\/(\w+);/)?.[1] || 'jpg';
+          const selfieKey = `gov-id/${userId}/${id}-selfie.${selfieExt}`;
+
+          const selfieResult = await uploadToR2('documents', {
+            data: selfieBuffer,
+            key: selfieKey,
+            contentType: `image/${selfieExt}`,
+            metadata: { userId, verificationId: id, type: 'selfie' },
+          });
+          selfieStorageKey = selfieResult.key;
+        }
+
+        logger.info('Document images uploaded to R2', {
+          userId, verificationId: id, documentKey: documentStorageKey, selfieKey: selfieStorageKey,
+        });
+      } catch (uploadErr: any) {
+        logger.error('R2 upload failed for document verification', { error: uploadErr.message, userId });
+        // Continue with metadata-only storage as fallback
+      }
+    }
+
     const docMetadata = {
       documentType,
       country,
       hasSelfie: !!selfieImageBase64,
       submittedAt: Date.now(),
       imageSize: documentImageBase64.length,
-      // In production: store image in Cloudflare R2 or S3, reference here
-      // For security: we do NOT store the raw base64 in the DB
-      storageRef: `doc-${id}`,
+      storageRef: documentStorageKey || `doc-${id}`,
+      selfieStorageRef: selfieStorageKey || null,
+      r2Enabled: isR2Enabled(),
     };
 
     createVerification({
@@ -380,6 +423,18 @@ router.post('/document/upload', requireAuth, async (req: Request, res: Response)
       trustPoints: TRUST_POINTS.GOVERNMENT_ID,
       metadata: JSON.stringify(docMetadata),
     });
+
+    // Send admin notification about new verification request
+    try {
+      const user = getUserById(userId);
+      if (user) {
+        sendAdminVerificationNotification(
+          user.email, user.name ?? user.email, userId, documentType, id
+        ).catch(err => logger.error('Failed to send admin verification notification', { error: err.message }));
+      }
+    } catch (notifyErr: any) {
+      logger.error('Admin notification error', { error: notifyErr.message });
+    }
 
     logger.info('Document verification submitted', {
       userId, documentType, country, verificationId: id,
