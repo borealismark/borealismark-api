@@ -40,6 +40,8 @@ import {
   getSupportStats,
   getPlatformEvents,
   getEventStats,
+  setEmailVerified,
+  computeAndStoreTrustScore,
 } from '../db/database';
 import { handleSupportChat } from '../services/aiSupport';
 import { uploadDatabaseBackup, isR2Enabled, getR2Status } from '../services/r2Storage';
@@ -157,6 +159,24 @@ router.patch('/users/:id', requireAuth, requireAdmin, (req: Request, res: Respon
   } catch (err: any) {
     logger.error('Admin update user error', { error: err.message });
     res.status(500).json({ success: false, error: 'Failed to update user' });
+  }
+});
+
+// ─── POST /users/:id/verify-email — Admin: force-verify user email ─────────
+
+router.post('/users/:id/verify-email', requireAuth, requireAdmin, (req: Request, res: Response) => {
+  try {
+    const user = getUserById(req.params.id);
+    if (!user) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+    setEmailVerified(req.params.id, true);
+    const trustScore = computeAndStoreTrustScore(req.params.id);
+    logger.info('Admin force-verified email', { adminId: (req as any).user.sub, userId: req.params.id });
+    res.json({ success: true, message: 'Email verified', trustScore: trustScore.totalScore, trustLevel: trustScore.trustLevel });
+  } catch (err: any) {
+    logger.error('Admin verify email error', { error: err.message });
+    res.status(500).json({ success: false, error: 'Failed to verify email' });
   }
 });
 
