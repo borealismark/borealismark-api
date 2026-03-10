@@ -1,6 +1,6 @@
 {
   "name": "@borealismark/api",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "description": "BorealisMark Protocol — AI Trust Audit API",
   "main": "dist/server.js",
   "scripts": {

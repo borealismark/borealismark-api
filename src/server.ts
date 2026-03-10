@@ -28,12 +28,14 @@ import adminRouter from './routes/admin';
 import adminMailRouter from './routes/adminMail';
 import verificationRouter from './routes/verification';
 import imagesRouter from './routes/images';
+import notificationsRouter from './routes/notifications';
+import growthRouter from './routes/growth';
 import { cleanupExpiredInvoices } from './hedera/usdc';
 import { validateHederaConfig, logHealthCheckResults } from './hedera/healthcheck';
 import { validateStripeConfig, getStripeMode } from './stripe/mode';
 import { startAggregationSchedule } from './services/dataStore';
 import { startAnchoringSchedule } from './services/hederaAnchor';
-import { events as eventBus, initAdminNotifications } from './services/eventBus';
+import { events as eventBus, initAdminNotifications, initNotificationListeners } from './services/eventBus';
 import { getDetailedHealth } from './services/monitoring';
 import {
   getExpiredUsdcSubscriptions, getAllExpiredSubscriptions, getExpiringSubscriptions,
@@ -205,6 +207,8 @@ app.use('/v1/analytics', analyticsRouter);
 app.use('/v1/admin',     adminRouter);
 app.use('/v1/admin/mail', adminMailRouter);
 app.use('/v1/verification', verificationRouter);
+app.use('/v1/notifications', notificationsRouter);
+app.use('/v1/growth', growthRouter);
 
 // ─── Static Files (Dashboard) ────────────────────────────────────────────────
 
@@ -535,6 +539,22 @@ app.listen(PORT, () => {
   startAggregationSchedule();
   startAnchoringSchedule();
   initAdminNotifications();
+  initNotificationListeners();
+
+  // v40: Notification cleanup — sweep notifications older than 90 days every 24h
+  const { deleteOldNotifications } = require('./db/database');
+  setInterval(() => {
+    try {
+      const deleted = deleteOldNotifications();
+      if (deleted > 0) logger.info(`Cleaned up ${deleted} old notifications`);
+    } catch (err: any) {
+      logger.error('Notification cleanup error', { error: err.message });
+    }
+  }, 24 * 60 * 60 * 1000);
+  // Run once on startup after 60s
+  setTimeout(() => {
+    try { deleteOldNotifications(); } catch { /* non-critical */ }
+  }, 60_000);
 
   // Emit system startup event
   eventBus.systemError('startup', 'API started successfully'); // reusing as system event

@@ -432,3 +432,220 @@ export function initAdminNotifications(): void {
 
   logger.info('Admin notification listeners initialized');
 }
+
+// ─── v40 Signal Tower: In-App Notification Listeners ─────────────────────
+
+/**
+ * Initialize in-app notification generation from platform events.
+ * Creates user_notifications rows and pushes them via SSE.
+ * Called once at server startup.
+ */
+export function initNotificationListeners(): void {
+  // Order events → notify buyer and seller
+  onEvent(EventTypes.ORDER_PAYMENT_RECEIVED, async (event) => {
+    try {
+      const { createNotification, getNotificationPreferences } = await import('../db/database');
+      const { pushToUser } = await import('../routes/notifications');
+      const sellerId = event.payload?.sellerId;
+      if (sellerId) {
+        const prefs = getNotificationPreferences(sellerId);
+        if (prefs.inappOrders) {
+          const notif = createNotification({
+            userId: sellerId,
+            type: 'order',
+            title: 'Payment Received',
+            body: `A buyer has deposited payment for your listing. Deposit your trust bond to proceed.`,
+            icon: 'dollar',
+            link: `/dashboard/orders`,
+          });
+          pushToUser(sellerId, { type: 'notification', ...notif });
+        }
+      }
+    } catch (err: any) {
+      logger.error('Order notification error', { error: err.message });
+    }
+  });
+
+  onEvent(EventTypes.ORDER_SHIPPED, async (event) => {
+    try {
+      const { createNotification, getNotificationPreferences } = await import('../db/database');
+      const { pushToUser } = await import('../routes/notifications');
+      const buyerId = event.payload?.buyerId;
+      if (buyerId) {
+        const prefs = getNotificationPreferences(buyerId);
+        if (prefs.inappOrders) {
+          const notif = createNotification({
+            userId: buyerId,
+            type: 'order',
+            title: 'Order Shipped',
+            body: `Your order has been shipped! Track your package and confirm delivery when it arrives.`,
+            icon: 'truck',
+            link: `/dashboard/orders`,
+          });
+          pushToUser(buyerId, { type: 'notification', ...notif });
+        }
+      }
+    } catch (err: any) {
+      logger.error('Shipped notification error', { error: err.message });
+    }
+  });
+
+  onEvent(EventTypes.ORDER_SETTLED, async (event) => {
+    try {
+      const { createNotification, getNotificationPreferences } = await import('../db/database');
+      const { pushToUser } = await import('../routes/notifications');
+      const { buyerId, sellerId, totalUsdc } = event.payload ?? {};
+      const amount = totalUsdc ? ` (${Number(totalUsdc).toFixed(2)} USDC)` : '';
+
+      for (const uid of [buyerId, sellerId].filter(Boolean)) {
+        const prefs = getNotificationPreferences(uid);
+        if (prefs.inappOrders) {
+          const isSeller = uid === sellerId;
+          const notif = createNotification({
+            userId: uid,
+            type: 'order',
+            title: 'Order Settled',
+            body: isSeller
+              ? `Your sale has been settled${amount}. Funds are being released to your account.`
+              : `Your purchase has been settled${amount}. Transaction complete!`,
+            icon: 'check-circle',
+            link: `/dashboard/orders`,
+          });
+          pushToUser(uid, { type: 'notification', ...notif });
+        }
+      }
+    } catch (err: any) {
+      logger.error('Settlement notification error', { error: err.message });
+    }
+  });
+
+  // Verification events → notify user
+  onEvent(EventTypes.USER_VERIFIED, async (event) => {
+    try {
+      const { createNotification, getNotificationPreferences } = await import('../db/database');
+      const { pushToUser } = await import('../routes/notifications');
+      const userId = event.actorId;
+      if (userId) {
+        const prefs = getNotificationPreferences(userId);
+        if (prefs.inappVerification) {
+          const notif = createNotification({
+            userId,
+            type: 'verification',
+            title: 'Email Verified',
+            body: 'Your email has been verified. You earned trust points!',
+            icon: 'shield',
+            link: `/dashboard/trust`,
+          });
+          pushToUser(userId, { type: 'notification', ...notif });
+        }
+      }
+    } catch (err: any) {
+      logger.error('Verification notification error', { error: err.message });
+    }
+  });
+
+  // Payment events → notify user
+  onEvent(EventTypes.SUBSCRIPTION_CREATED, async (event) => {
+    try {
+      const { createNotification, getNotificationPreferences } = await import('../db/database');
+      const { pushToUser } = await import('../routes/notifications');
+      const userId = event.actorId;
+      if (userId) {
+        const prefs = getNotificationPreferences(userId);
+        if (prefs.inappPayment) {
+          const tier = event.payload?.tier ?? 'Pro';
+          const notif = createNotification({
+            userId,
+            type: 'payment',
+            title: 'Subscription Activated',
+            body: `Your ${tier.charAt(0).toUpperCase() + tier.slice(1)} plan is now active. Enjoy your upgraded features!`,
+            icon: 'star',
+            link: `/dashboard/settings`,
+          });
+          pushToUser(userId, { type: 'notification', ...notif });
+        }
+      }
+    } catch (err: any) {
+      logger.error('Subscription notification error', { error: err.message });
+    }
+  });
+
+  onEvent(EventTypes.SUBSCRIPTION_EXPIRED, async (event) => {
+    try {
+      const { createNotification, getNotificationPreferences } = await import('../db/database');
+      const { pushToUser } = await import('../routes/notifications');
+      const userId = event.actorId;
+      if (userId) {
+        const prefs = getNotificationPreferences(userId);
+        if (prefs.inappPayment) {
+          const notif = createNotification({
+            userId,
+            type: 'payment',
+            title: 'Subscription Expired',
+            body: 'Your subscription has expired. Renew to keep your premium features.',
+            icon: 'alert-triangle',
+            link: `/dashboard/settings`,
+          });
+          pushToUser(userId, { type: 'notification', ...notif });
+        }
+      }
+    } catch (err: any) {
+      logger.error('Expiry notification error', { error: err.message });
+    }
+  });
+
+  // Bot events → notify owner
+  onEvent(EventTypes.BOT_RATED, async (event) => {
+    try {
+      const { createNotification, getNotificationPreferences, getDb } = await import('../db/database');
+      const { pushToUser } = await import('../routes/notifications');
+      const botId = event.targetId;
+      if (!botId) return;
+      const bot = getDb().prepare('SELECT owner_id, name FROM bots WHERE id = ?').get(botId) as any;
+      if (!bot) return;
+      const prefs = getNotificationPreferences(bot.owner_id);
+      if (prefs.inappSystem) {
+        const rating = event.payload?.rating ?? 0;
+        const notif = createNotification({
+          userId: bot.owner_id,
+          type: 'system',
+          title: 'Bot Rated',
+          body: `${bot.name} received a ${rating}/5 rating.`,
+          icon: 'star',
+          link: `/dashboard/bots`,
+        });
+        pushToUser(bot.owner_id, { type: 'notification', ...notif });
+      }
+    } catch (err: any) {
+      logger.error('Bot rating notification error', { error: err.message });
+    }
+  });
+
+  // Support events → notify user
+  onEvent(EventTypes.SUPPORT_RESOLVED, async (event) => {
+    try {
+      const { createNotification, getNotificationPreferences, getDb } = await import('../db/database');
+      const { pushToUser } = await import('../routes/notifications');
+      const threadId = event.targetId;
+      if (!threadId) return;
+      const thread = getDb().prepare('SELECT user_id FROM support_threads WHERE id = ?').get(threadId) as any;
+      if (!thread?.user_id) return;
+      const prefs = getNotificationPreferences(thread.user_id);
+      if (prefs.inappSupport) {
+        const notif = createNotification({
+          userId: thread.user_id,
+          type: 'support',
+          title: 'Support Ticket Resolved',
+          body: 'Your support request has been resolved. Let us know if you need anything else.',
+          icon: 'message-circle',
+          link: `/dashboard/support`,
+        });
+        pushToUser(thread.user_id, { type: 'notification', ...notif });
+      }
+    } catch (err: any) {
+      logger.error('Support notification error', { error: err.message });
+    }
+  });
+
+  logger.info('In-app notification listeners initialized (Signal Tower v40)');
+}

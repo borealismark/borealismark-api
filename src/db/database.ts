@@ -972,6 +972,41 @@ function initSchema(db: Database.Database): void {
       last_computed_at INTEGER NOT NULL,
       FOREIGN KEY (user_id) REFERENCES users(id)
     );
+
+    -- ── v40 Signal Tower: Notification Center ──────────────────────────────────
+
+    CREATE TABLE IF NOT EXISTS user_notifications (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      type TEXT NOT NULL,          -- 'order' | 'verification' | 'payment' | 'system' | 'trust' | 'support'
+      title TEXT NOT NULL,
+      body TEXT NOT NULL,
+      icon TEXT DEFAULT 'bell',    -- icon hint for frontend
+      link TEXT,                   -- deep link (e.g., '/dashboard/orders/abc')
+      read INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_notif_user ON user_notifications(user_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_notif_unread ON user_notifications(user_id, read);
+
+    CREATE TABLE IF NOT EXISTS notification_preferences (
+      user_id TEXT PRIMARY KEY,
+      email_orders INTEGER NOT NULL DEFAULT 1,
+      email_verification INTEGER NOT NULL DEFAULT 1,
+      email_payment INTEGER NOT NULL DEFAULT 1,
+      email_system INTEGER NOT NULL DEFAULT 1,
+      email_marketing INTEGER NOT NULL DEFAULT 0,
+      inapp_orders INTEGER NOT NULL DEFAULT 1,
+      inapp_verification INTEGER NOT NULL DEFAULT 1,
+      inapp_payment INTEGER NOT NULL DEFAULT 1,
+      inapp_system INTEGER NOT NULL DEFAULT 1,
+      inapp_trust INTEGER NOT NULL DEFAULT 1,
+      inapp_support INTEGER NOT NULL DEFAULT 1,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    );
   `);
 
   // Migrate: add CAD pricing + shipping columns to marketplace_listings
@@ -3722,4 +3757,179 @@ export function getTrustScore(userId: string): TrustScoreRecord | null {
 export function getUserTrustLevel(userId: string): string {
   const score = getTrustScore(userId);
   return score?.trustLevel ?? 'unverified';
+}
+
+// ─── v40 Signal Tower: Notification Queries ──────────────────────────────────
+
+export interface NotificationRecord {
+  id: string;
+  userId: string;
+  type: string;
+  title: string;
+  body: string;
+  icon: string;
+  link: string | null;
+  read: boolean;
+  createdAt: number;
+}
+
+function mapNotificationRow(row: any): NotificationRecord {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    type: row.type,
+    title: row.title,
+    body: row.body,
+    icon: row.icon ?? 'bell',
+    link: row.link,
+    read: !!row.read,
+    createdAt: row.created_at,
+  };
+}
+
+export function createNotification(data: {
+  userId: string;
+  type: string;
+  title: string;
+  body: string;
+  icon?: string;
+  link?: string;
+}): NotificationRecord {
+  const db = getDb();
+  const id = uuidv4();
+  const now = Date.now();
+  db.prepare(`
+    INSERT INTO user_notifications (id, user_id, type, title, body, icon, link, read, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)
+  `).run(id, data.userId, data.type, data.title, data.body, data.icon ?? 'bell', data.link ?? null, now);
+  return { id, userId: data.userId, type: data.type, title: data.title, body: data.body, icon: data.icon ?? 'bell', link: data.link ?? null, read: false, createdAt: now };
+}
+
+export function getUserNotifications(userId: string, opts?: { limit?: number; offset?: number; unreadOnly?: boolean }): NotificationRecord[] {
+  const db = getDb();
+  const limit = Math.min(100, Math.max(1, opts?.limit ?? 50));
+  const offset = Math.max(0, opts?.offset ?? 0);
+  let query = 'SELECT * FROM user_notifications WHERE user_id = ?';
+  const params: any[] = [userId];
+  if (opts?.unreadOnly) {
+    query += ' AND read = 0';
+  }
+  query += ' ORDER BY created_at DESC LIMIT ? OFFSET ?';
+  params.push(limit, offset);
+  return (db.prepare(query).all(...params) as any[]).map(mapNotificationRow);
+}
+
+export function getUnreadNotificationCount(userId: string): number {
+  const db = getDb();
+  return (db.prepare('SELECT COUNT(*) as c FROM user_notifications WHERE user_id = ? AND read = 0').get(userId) as any)?.c ?? 0;
+}
+
+export function markNotificationRead(notificationId: string, userId: string): boolean {
+  const db = getDb();
+  const result = db.prepare('UPDATE user_notifications SET read = 1 WHERE id = ? AND user_id = ?').run(notificationId, userId);
+  return result.changes > 0;
+}
+
+export function markAllNotificationsRead(userId: string): number {
+  const db = getDb();
+  const result = db.prepare('UPDATE user_notifications SET read = 1 WHERE user_id = ? AND read = 0').run(userId);
+  return result.changes;
+}
+
+export function deleteOldNotifications(olderThanMs: number = 90 * 24 * 60 * 60 * 1000): number {
+  const db = getDb();
+  const cutoff = Date.now() - olderThanMs;
+  const result = db.prepare('DELETE FROM user_notifications WHERE created_at < ?').run(cutoff);
+  return result.changes;
+}
+
+// ─── Notification Preferences ─────────────────────────────────────────────────
+
+export interface NotificationPreferences {
+  userId: string;
+  emailOrders: boolean;
+  emailVerification: boolean;
+  emailPayment: boolean;
+  emailSystem: boolean;
+  emailMarketing: boolean;
+  inappOrders: boolean;
+  inappVerification: boolean;
+  inappPayment: boolean;
+  inappSystem: boolean;
+  inappTrust: boolean;
+  inappSupport: boolean;
+  updatedAt: number;
+}
+
+function mapPrefsRow(row: any): NotificationPreferences {
+  return {
+    userId: row.user_id,
+    emailOrders: !!row.email_orders,
+    emailVerification: !!row.email_verification,
+    emailPayment: !!row.email_payment,
+    emailSystem: !!row.email_system,
+    emailMarketing: !!row.email_marketing,
+    inappOrders: !!row.inapp_orders,
+    inappVerification: !!row.inapp_verification,
+    inappPayment: !!row.inapp_payment,
+    inappSystem: !!row.inapp_system,
+    inappTrust: !!row.inapp_trust,
+    inappSupport: !!row.inapp_support,
+    updatedAt: row.updated_at,
+  };
+}
+
+export function getNotificationPreferences(userId: string): NotificationPreferences {
+  const db = getDb();
+  const row = db.prepare('SELECT * FROM notification_preferences WHERE user_id = ?').get(userId) as any;
+  if (row) return mapPrefsRow(row);
+  // Return defaults if no row exists
+  return {
+    userId,
+    emailOrders: true, emailVerification: true, emailPayment: true,
+    emailSystem: true, emailMarketing: false,
+    inappOrders: true, inappVerification: true, inappPayment: true,
+    inappSystem: true, inappTrust: true, inappSupport: true,
+    updatedAt: 0,
+  };
+}
+
+export function updateNotificationPreferences(userId: string, prefs: Partial<Omit<NotificationPreferences, 'userId' | 'updatedAt'>>): NotificationPreferences {
+  const db = getDb();
+  const now = Date.now();
+  const current = getNotificationPreferences(userId);
+
+  db.prepare(`
+    INSERT INTO notification_preferences (user_id, email_orders, email_verification, email_payment, email_system, email_marketing, inapp_orders, inapp_verification, inapp_payment, inapp_system, inapp_trust, inapp_support, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(user_id) DO UPDATE SET
+      email_orders = excluded.email_orders,
+      email_verification = excluded.email_verification,
+      email_payment = excluded.email_payment,
+      email_system = excluded.email_system,
+      email_marketing = excluded.email_marketing,
+      inapp_orders = excluded.inapp_orders,
+      inapp_verification = excluded.inapp_verification,
+      inapp_payment = excluded.inapp_payment,
+      inapp_system = excluded.inapp_system,
+      inapp_trust = excluded.inapp_trust,
+      inapp_support = excluded.inapp_support,
+      updated_at = excluded.updated_at
+  `).run(
+    userId,
+    prefs.emailOrders !== undefined ? (prefs.emailOrders ? 1 : 0) : (current.emailOrders ? 1 : 0),
+    prefs.emailVerification !== undefined ? (prefs.emailVerification ? 1 : 0) : (current.emailVerification ? 1 : 0),
+    prefs.emailPayment !== undefined ? (prefs.emailPayment ? 1 : 0) : (current.emailPayment ? 1 : 0),
+    prefs.emailSystem !== undefined ? (prefs.emailSystem ? 1 : 0) : (current.emailSystem ? 1 : 0),
+    prefs.emailMarketing !== undefined ? (prefs.emailMarketing ? 1 : 0) : (current.emailMarketing ? 1 : 0),
+    prefs.inappOrders !== undefined ? (prefs.inappOrders ? 1 : 0) : (current.inappOrders ? 1 : 0),
+    prefs.inappVerification !== undefined ? (prefs.inappVerification ? 1 : 0) : (current.inappVerification ? 1 : 0),
+    prefs.inappPayment !== undefined ? (prefs.inappPayment ? 1 : 0) : (current.inappPayment ? 1 : 0),
+    prefs.inappSystem !== undefined ? (prefs.inappSystem ? 1 : 0) : (current.inappSystem ? 1 : 0),
+    prefs.inappTrust !== undefined ? (prefs.inappTrust ? 1 : 0) : (current.inappTrust ? 1 : 0),
+    prefs.inappSupport !== undefined ? (prefs.inappSupport ? 1 : 0) : (current.inappSupport ? 1 : 0),
+    now,
+  );
+
+  return getNotificationPreferences(userId);
 }
