@@ -901,6 +901,7 @@ export async function sendVerificationResultEmail(
   approved: boolean,
   verificationType: string,
   reason?: string,
+  trustPointsEarned?: number,
 ): Promise<boolean> {
   const timestamp = new Date().toLocaleString('en-US', { timeZone: 'America/Toronto' });
   const headingColor = approved ? '#4CAF50' : '#FFA500';
@@ -943,7 +944,7 @@ export async function sendVerificationResultEmail(
            <p class="detail"><strong>Status:</strong> <span class="badge">APPROVED</span></p>
            <p class="detail"><strong>Approved:</strong> ${timestamp}</p>
            <div class="divider"></div>
-           <p>Your verification is now active. You have earned <span class="highlight">10 trust points</span> for completing this verification. These points contribute to your BorealisMark Score and unlock additional marketplace features.</p>
+           <p>Your verification is now active. You have earned <span class="highlight">${trustPointsEarned ?? 10} trust points</span> for completing this verification. These points contribute to your BorealisMark Score and unlock additional marketplace features.</p>
            <p>Thank you for verifying your identity on BorealisMark.</p>`
         : `<p>Hi ${userName || 'there'},</p>
            <p>Your <strong style="color:#fff">${verificationType}</strong> verification could not be approved at this time.</p>
@@ -962,7 +963,7 @@ export async function sendVerificationResultEmail(
 </html>`;
 
   const text = approved
-    ? `Verification Approved\n\nHi ${userName || 'there'},\n\nCongratulations! Your ${verificationType} verification has been approved.\n\nVerification Type: ${verificationType}\nStatus: APPROVED\nApproved: ${timestamp}\n\nYou have earned 10 trust points for completing this verification.\n\n— BorealisMark Protocol`
+    ? `Verification Approved\n\nHi ${userName || 'there'},\n\nCongratulations! Your ${verificationType} verification has been approved.\n\nVerification Type: ${verificationType}\nStatus: APPROVED\nApproved: ${timestamp}\n\nYou have earned ${trustPointsEarned ?? 10} trust points for completing this verification.\n\n— BorealisMark Protocol`
     : `Verification Update\n\nHi ${userName || 'there'},\n\nYour ${verificationType} verification could not be approved at this time.\n\nVerification Type: ${verificationType}\nStatus: UPDATE REQUIRED\n${reason ? `Reason: ${reason}\n` : ''}\nPlease resubmit your verification in your account settings.\n\n— BorealisMark Protocol`;
 
   if (!process.env.RESEND_API_KEY) {

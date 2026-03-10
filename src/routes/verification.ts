@@ -39,7 +39,7 @@ import {
   TRUST_LEVELS,
 } from '../db/database';
 import { uploadToR2, isR2Enabled } from '../services/r2Storage';
-import { sendAdminVerificationNotification } from '../services/email';
+import { sendAdminVerificationNotification, sendVerificationResultEmail } from '../services/email';
 
 const router = Router();
 
@@ -215,21 +215,54 @@ router.post('/social/initiate', requireAuth, async (req: Request, res: Response)
 });
 
 function getSocialInstructions(platform: string, code: string): string {
-  const platformNames: Record<string, string> = {
-    facebook: 'Facebook',
-    linkedin: 'LinkedIn',
-    x: 'X (Twitter)',
-    instagram: 'Instagram',
-    tiktok: 'TikTok',
+  const platformGuides: Record<string, { name: string; steps: string }> = {
+    facebook: {
+      name: 'Facebook',
+      steps: `1. Go to your Facebook profile and create a new public post.\n` +
+        `2. Paste the verification code below as the post content:\n\n   ${code}\n\n` +
+        `3. Set the post visibility to "Public" (globe icon).\n` +
+        `4. Click "Post", then come back and click "Confirm".`,
+    },
+    linkedin: {
+      name: 'LinkedIn',
+      steps: `1. Go to your LinkedIn feed and click "Start a post".\n` +
+        `2. Paste the verification code below:\n\n   ${code}\n\n` +
+        `3. Set visibility to "Anyone" (public).\n` +
+        `4. Click "Post", then come back and click "Confirm".`,
+    },
+    x: {
+      name: 'X (Twitter)',
+      steps: `1. Go to X.com and compose a new post (tweet).\n` +
+        `2. Paste the verification code below:\n\n   ${code}\n\n` +
+        `3. Ensure your account is not set to "Protected" (private).\n` +
+        `4. Click "Post", then come back and click "Confirm".`,
+    },
+    instagram: {
+      name: 'Instagram',
+      steps: `1. Open Instagram and create a new Story or post.\n` +
+        `2. Include the verification code below in the caption or as text on the Story:\n\n   ${code}\n\n` +
+        `3. Ensure your account is set to "Public" (not private).\n` +
+        `4. Publish, then come back and click "Confirm".`,
+    },
+    tiktok: {
+      name: 'TikTok',
+      steps: `1. Open TikTok and create a new video or text post.\n` +
+        `2. Include the verification code below in the caption:\n\n   ${code}\n\n` +
+        `3. Set the post to "Everyone" (public visibility).\n` +
+        `4. Post it, then come back and click "Confirm".`,
+    },
   };
-  const name = platformNames[platform] || platform;
-  return `To verify your ${name} account:\n\n` +
-    `1. Post the following code publicly on your ${name} profile or as a new post:\n\n` +
-    `   ${code}\n\n` +
-    `2. The post must be publicly visible (not friends-only or private).\n` +
-    `3. Once posted, click "Confirm" and our system will verify it.\n` +
-    `4. You can remove the post after verification is confirmed.\n\n` +
-    `This code expires in 72 hours.`;
+
+  const guide = platformGuides[platform] || {
+    name: platform,
+    steps: `1. Post the code publicly on your ${platform} profile:\n\n   ${code}\n\n` +
+      `2. Ensure the post is publicly visible.\n` +
+      `3. Come back and click "Confirm".`,
+  };
+
+  return `To verify your ${guide.name} account:\n\n${guide.steps}\n\n` +
+    `You can remove the post after verification is confirmed.\n` +
+    `This code expires in 48 hours.`;
 }
 
 // ─── POST /social/confirm — Confirm social media post was made ───────────────
@@ -262,13 +295,13 @@ router.post('/social/confirm', requireAuth, async (req: Request, res: Response) 
       });
     }
 
-    // Check if initiated more than 72 hours ago
+    // Check if initiated more than 48 hours ago (v38: shortened from 72h)
     const hoursElapsed = (Date.now() - verification.submittedAt) / (1000 * 60 * 60);
-    if (hoursElapsed > 72) {
+    if (hoursElapsed > 48) {
       updateVerificationStatus(verification.id, 'expired');
       return res.status(400).json({
         success: false,
-        error: 'Verification code has expired. Please initiate a new verification.',
+        error: 'Verification code has expired (48-hour window). Please initiate a new verification.',
       });
     }
 
@@ -682,6 +715,26 @@ router.post('/admin/review', requireAuth, (req: Request, res: Response) => {
     // Recompute trust score for the user
     const trustScore = computeAndStoreTrustScore(verification.userId);
 
+    // v38: Send verification result email to user
+    try {
+      const user = getUserById(verification.userId);
+      if (user) {
+        const typeLabel = verification.verificationType === 'government_id'
+          ? 'Government ID'
+          : `${verification.platform || 'Social Media'} Account`;
+        sendVerificationResultEmail(
+          user.email,
+          user.name ?? user.email,
+          decision === 'approved',
+          typeLabel,
+          notes,
+          trustPoints,
+        ).catch(err => logger.error('Failed to send verification result email', { error: err.message }));
+      }
+    } catch (emailErr: any) {
+      logger.error('Verification result email error', { error: emailErr.message });
+    }
+
     logger.info('Verification reviewed', {
       verificationId, decision, adminId,
       userId: verification.userId,
@@ -703,5 +756,114 @@ router.post('/admin/review', requireAuth, (req: Request, res: Response) => {
     res.status(500).json({ success: false, error: 'Failed to review verification' });
   }
 });
+
+// ─── GET /admin/stats — Verification Analytics (v38) ──────────────────────────
+
+router.get('/admin/stats', requireAuth, (req: Request, res: Response) => {
+  const { role } = (req as any).user;
+  if (role !== 'admin') {
+    return res.status(403).json({ success: false, error: 'Admin access required' });
+  }
+
+  try {
+    const { getDb } = require('../db/database');
+    const db = getDb();
+
+    // Total verifications by type and status
+    const byTypeAndStatus = db.prepare(`
+      SELECT verification_type, status, COUNT(*) as count
+      FROM user_verifications
+      GROUP BY verification_type, status
+    `).all() as Array<{ verification_type: string; status: string; count: number }>;
+
+    // Trust level distribution across users
+    const trustLevelDistribution = db.prepare(`
+      SELECT trust_level, COUNT(*) as count
+      FROM user_trust_scores
+      GROUP BY trust_level
+      ORDER BY total_score DESC
+    `).all() as Array<{ trust_level: string; count: number }>;
+
+    // Average trust score
+    const avgScore = db.prepare(`
+      SELECT AVG(total_score) as avg_score, MAX(total_score) as max_score, MIN(total_score) as min_score
+      FROM user_trust_scores
+    `).get() as { avg_score: number; max_score: number; min_score: number } | undefined;
+
+    // Verifications in the last 7 days
+    const sevenDaysAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
+    const recentActivity = db.prepare(`
+      SELECT verification_type, status, COUNT(*) as count
+      FROM user_verifications
+      WHERE submitted_at > ?
+      GROUP BY verification_type, status
+    `).all(sevenDaysAgo) as Array<{ verification_type: string; status: string; count: number }>;
+
+    // Pending review queue size
+    const pendingCount = db.prepare(`
+      SELECT COUNT(*) as count FROM user_verifications WHERE status = 'pending'
+    `).get() as { count: number };
+
+    // Completion funnel: how many users have each layer
+    const funnel = db.prepare(`
+      SELECT
+        (SELECT COUNT(*) FROM user_trust_scores WHERE email_verified = 1) as email_verified,
+        (SELECT COUNT(*) FROM user_trust_scores WHERE social_verified > 0) as has_social,
+        (SELECT COUNT(*) FROM user_trust_scores WHERE social_verified >= 3) as max_social,
+        (SELECT COUNT(*) FROM user_trust_scores WHERE document_verified = 1) as has_gov_id,
+        (SELECT COUNT(*) FROM user_trust_scores WHERE transaction_count > 0) as has_transactions,
+        (SELECT COUNT(*) FROM user_trust_scores) as total_users
+    `).get() as Record<string, number>;
+
+    res.json({
+      success: true,
+      data: {
+        overview: {
+          totalUsers: funnel?.total_users || 0,
+          pendingReviews: pendingCount?.count || 0,
+          averageScore: Math.round(avgScore?.avg_score || 0),
+          maxScore: avgScore?.max_score || 0,
+        },
+        byTypeAndStatus,
+        trustLevelDistribution,
+        recentActivity,
+        completionFunnel: funnel,
+        generatedAt: new Date().toISOString(),
+      },
+    });
+  } catch (err: any) {
+    logger.error('Verification stats error', { error: err.message });
+    res.status(500).json({ success: false, error: 'Failed to fetch verification stats' });
+  }
+});
+
+// ─── Auto-expire stale pending social verifications (v38) ─────────────────────
+
+function sweepExpiredVerifications(): void {
+  try {
+    const { getDb } = require('../db/database');
+    const db = getDb();
+    const cutoff48h = Date.now() - (48 * 60 * 60 * 1000);
+
+    const expired = db.prepare(`
+      UPDATE user_verifications
+      SET status = 'expired', verified_at = ?
+      WHERE status = 'pending'
+        AND verification_type = 'social_media'
+        AND submitted_at < ?
+    `).run(Date.now(), cutoff48h);
+
+    if (expired.changes > 0) {
+      logger.info('Auto-expired stale social verifications', { count: expired.changes });
+    }
+  } catch (err: any) {
+    logger.error('Verification expiry sweep error', { error: err.message });
+  }
+}
+
+// Run expiry sweep every 6 hours
+setInterval(sweepExpiredVerifications, 6 * 60 * 60 * 1000);
+// Run once on startup after a short delay
+setTimeout(sweepExpiredVerifications, 30_000);
 
 export default router;
