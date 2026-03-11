@@ -34,7 +34,7 @@ import { Router, Request, Response } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { requireAuth, type AuthRequest } from './auth';
 import { logger } from '../middleware/logger';
-import { getDb, getUserTrustLevel } from '../db/database';
+import { getDb, computeAndStoreTrustScore } from '../db/database';
 import { importEbayStore } from '../services/ebayScraper';
 
 const router = Router();
@@ -110,11 +110,11 @@ router.post('/import', requireAuth, async (req: Request, res: Response) => {
       }
 
       // Trust gate check
-      const trustLevel = getUserTrustLevel(userId);
-      if (trustLevel && trustLevel.points < (service.min_trust_score || 0)) {
+      const trustData = computeAndStoreTrustScore(userId);
+      if (trustData.points < (service.min_trust_score || 0)) {
         return res.status(403).json({
           success: false,
-          error: `This service tier requires a trust score of at least ${service.min_trust_score}. Your current score: ${trustLevel.points}`,
+          error: `This service tier requires a trust score of at least ${service.min_trust_score}. Your current score: ${trustData.points}`,
         });
       }
     }
