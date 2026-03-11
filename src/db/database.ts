@@ -1112,15 +1112,32 @@ function initSchema(db: Database.Database): void {
     );
   `);
 
-  // ── Seed Migration Officer bot ────────────────────────────────────────────
+  // ── Seed Migration Officer as agent + bot ───────────────────────────────────
   {
-    const migrationOfficerExists = db.prepare(
-      "SELECT id FROM bots WHERE name = 'Migration Officer'"
+    const migrationAgentExists = db.prepare(
+      "SELECT id FROM agents WHERE name = 'Migration Officer'"
     ).get() as { id: string } | undefined;
 
-    if (!migrationOfficerExists) {
+    if (!migrationAgentExists) {
       const migrationOfficerId = uuidv4();
-      // Find the system admin (first admin user) to own the bot
+      const now = Date.now();
+
+      // First: register as an agent (required for terminal_services FK)
+      // Use a placeholder registrant_key_id since this is a system agent
+      db.prepare(`
+        INSERT INTO agents (id, name, description, version, registered_at, registrant_key_id, active)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        migrationOfficerId,
+        'Migration Officer',
+        'Cross-platform listing migration and sync specialist. Imports external store listings into Borealis Terminal and keeps them synchronized — automatically detecting sold-out items, price changes, and availability shifts.',
+        '1.0.0',
+        now,
+        'system-internal',
+        1
+      );
+
+      // Also register as a bot for the bot_jobs tracking system
       const adminUser = db.prepare("SELECT id FROM users WHERE role = 'admin' LIMIT 1").get() as { id: string } | undefined;
       if (adminUser) {
         db.prepare(`
@@ -1142,12 +1159,12 @@ function initSchema(db: Database.Database): void {
           47,
           0,
           'active',
-          Date.now(),
-          Date.now()
+          now,
+          now
         );
+      }
 
         // Create tiered service listings for Migration Officer
-        const now = Date.now();
 
         // Tier 1: Starter — One-time Import ($25)
         db.prepare(`
@@ -1206,8 +1223,7 @@ function initSchema(db: Database.Database): void {
           now
         );
 
-        logger.info(`Seeded Migration Officer bot (${migrationOfficerId}) with 3 tiered service listings`);
-      }
+        logger.info(`Seeded Migration Officer agent (${migrationOfficerId}) with 3 tiered service listings`);
     }
   }
 

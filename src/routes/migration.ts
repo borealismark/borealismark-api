@@ -41,6 +41,12 @@ const router = Router();
 
 // ─── Helper: get the Migration Officer bot ──────────────────────────────────
 function getMigrationOfficer() {
+  // Returns from agents table (used for services FK and general info)
+  return getDb().prepare("SELECT * FROM agents WHERE name = 'Migration Officer' AND active = 1").get() as any;
+}
+
+function getMigrationOfficerBot() {
+  // Returns from bots table (used for bot_jobs FK)
   return getDb().prepare("SELECT * FROM bots WHERE name = 'Migration Officer' AND status = 'active'").get() as any;
 }
 
@@ -144,7 +150,7 @@ router.post('/import', requireAuth, async (req: Request, res: Response) => {
     ).run(importId, userId, store_url, storeName, 'pending', Date.now());
 
     // Create a bot_job for the Migration Officer
-    const officer = getMigrationOfficer();
+    const officer = getMigrationOfficerBot();
     if (officer) {
       db.prepare(`
         INSERT INTO bot_jobs (id, bot_id, listing_id, job_type, title, description, status, created_at, updated_at)
@@ -382,7 +388,7 @@ router.post('/sync/run/:id', requireAuth, async (req: Request, res: Response) =>
       .run(Date.now(), Date.now(), req.params.id);
 
     // Create a bot job for the sweep
-    const officer = getMigrationOfficer();
+    const officer = getMigrationOfficerBot();
     if (officer) {
       db.prepare(`
         INSERT INTO bot_jobs (id, bot_id, listing_id, job_type, title, description, status, created_at, updated_at)
@@ -536,7 +542,7 @@ router.post('/listings/:id/delist', requireAuth, (req: Request, res: Response) =
     `).run(now, userId, listing.external_source || 'ebay');
 
     // Log as a bot job
-    const officer = getMigrationOfficer();
+    const officer = getMigrationOfficerBot();
     if (officer) {
       db.prepare(`
         INSERT INTO bot_jobs (id, bot_id, listing_id, job_type, title, description, status, created_at, updated_at)
@@ -611,9 +617,9 @@ router.get('/admin/overview', requireAuth, requireAdmin, (_req: Request, res: Re
       "SELECT id, store_name, frequency, last_run_at, next_run_at, listings_tracked, listings_delisted FROM sync_schedules ORDER BY last_run_at DESC LIMIT 10"
     ).all();
 
-    const officer = getMigrationOfficer();
-    const officerJobs = officer
-      ? db.prepare("SELECT COUNT(*) as cnt FROM bot_jobs WHERE bot_id = ?").get(officer.id) as { cnt: number }
+    const officerBot = getMigrationOfficerBot();
+    const officerJobs = officerBot
+      ? db.prepare("SELECT COUNT(*) as cnt FROM bot_jobs WHERE bot_id = ?").get(officerBot.id) as { cnt: number }
       : { cnt: 0 };
 
     return res.json({
@@ -668,7 +674,7 @@ router.post('/admin/sweep', requireAuth, requireAdmin, (_req: Request, res: Resp
     }
 
     // Log bot job
-    const officer = getMigrationOfficer();
+    const officer = getMigrationOfficerBot();
     if (officer) {
       db.prepare(`
         INSERT INTO bot_jobs (id, bot_id, listing_id, job_type, title, description, status, created_at, updated_at)
