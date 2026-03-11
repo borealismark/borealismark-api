@@ -7,6 +7,7 @@
  *   GET  /v1/admin/users             — List/search users
  *   GET  /v1/admin/users/:id         — User detail
  *   PATCH /v1/admin/users/:id        — Update user (tier, role, active)
+ *   DELETE /v1/admin/users/:id       — Delete user + all associated data
  *   GET  /v1/admin/support           — List support threads (inbox)
  *   GET  /v1/admin/support/:id       — Thread detail + messages
  *   PATCH /v1/admin/support/:id      — Update thread (status, assign)
@@ -167,6 +168,86 @@ router.patch('/users/:id', requireAuth, requireAdmin, (req: Request, res: Respon
   } catch (err: any) {
     logger.error('Admin update user error', { error: err.message });
     res.status(500).json({ success: false, error: 'Failed to update user' });
+  }
+});
+
+// ─── DELETE /users/:id — Delete User + All Associated Data ──────────────────
+
+router.delete('/users/:id', requireAuth, requireAdmin, (req: Request, res: Response) => {
+  try {
+    const user = getUserById(req.params.id);
+    if (!user) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+
+    const adminId = (req as any).user.sub;
+    const userId = req.params.id;
+
+    // Prevent self-deletion
+    if (userId === adminId) {
+      return res.status(400).json({ success: false, error: 'Cannot delete your own admin account' });
+    }
+
+    const db = getDb();
+
+    // Delete in dependency order to avoid FK issues
+    const deletions: Record<string, number> = {};
+
+    // Listing-related data
+    deletions.listingLikes = db.prepare('DELETE FROM listing_likes WHERE user_id = ?').run(userId).changes;
+    deletions.listingLikesOnTheirListings = db.prepare(
+      'DELETE FROM listing_likes WHERE listing_id IN (SELECT id FROM marketplace_listings WHERE user_id = ?)'
+    ).run(userId).changes;
+    deletions.watchlist = db.prepare('DELETE FROM user_watchlist WHERE user_id = ?').run(userId).changes;
+    deletions.watchlistOnTheirListings = db.prepare(
+      'DELETE FROM user_watchlist WHERE listing_id IN (SELECT id FROM marketplace_listings WHERE user_id = ?)'
+    ).run(userId).changes;
+
+    // Listings themselves
+    deletions.listings = db.prepare('DELETE FROM marketplace_listings WHERE user_id = ?').run(userId).changes;
+
+    // Trust scores
+    deletions.trustScores = db.prepare('DELETE FROM user_trust_scores WHERE user_id = ?').run(userId).changes;
+
+    // Bots & bot jobs/reviews
+    deletions.botReviews = db.prepare(
+      'DELETE FROM bot_reviews WHERE bot_id IN (SELECT id FROM bots WHERE owner_id = ?)'
+    ).run(userId).changes;
+    deletions.botJobs = db.prepare(
+      'DELETE FROM bot_jobs WHERE bot_id IN (SELECT id FROM bots WHERE owner_id = ?)'
+    ).run(userId).changes;
+    deletions.bots = db.prepare('DELETE FROM bots WHERE owner_id = ?').run(userId).changes;
+
+    // Orders (as buyer or seller)
+    deletions.orders = db.prepare('DELETE FROM marketplace_orders WHERE buyer_id = ? OR seller_id = ?').run(userId, userId).changes;
+
+    // Messages
+    deletions.messages = db.prepare('DELETE FROM messages WHERE sender_id = ? OR receiver_id = ?').run(userId, userId).changes;
+
+    // Support threads
+    deletions.supportMessages = db.prepare(
+      "DELETE FROM support_messages WHERE thread_id IN (SELECT id FROM support_threads WHERE customer_email = ?)"
+    ).run(user.email).changes;
+    deletions.supportThreads = db.prepare("DELETE FROM support_threads WHERE customer_email = ?").run(user.email).changes;
+
+    // Finally, delete the user
+    deletions.user = db.prepare('DELETE FROM users WHERE id = ?').run(userId).changes;
+
+    logger.info('Admin deleted user and all associated data', {
+      adminId,
+      deletedUserId: userId,
+      deletedUsername: user.username,
+      deletions,
+    });
+
+    res.json({
+      success: true,
+      message: `User "${user.username}" and all associated data deleted`,
+      deletions,
+    });
+  } catch (err: any) {
+    logger.error('Admin delete user error', { error: err.message });
+    res.status(500).json({ success: false, error: 'Failed to delete user' });
   }
 });
 
