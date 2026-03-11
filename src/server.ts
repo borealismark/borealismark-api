@@ -265,7 +265,8 @@ app.use((_req, res) => {
     available: [
       '/v1/auth', '/v1/agents', '/v1/trust', '/v1/network', '/v1/marks',
       '/v1/keys', '/v1/webhooks', '/v1/payments', '/v1/terminal', '/v1/marketplace',
-      '/v1/usage', '/v1/docs', '/v1/bots', '/v1/support', '/v1/analytics', '/v1/admin', '/v1/admin/mail', '/health',
+      '/v1/usage', '/v1/docs', '/v1/bots', '/v1/support', '/v1/analytics', '/v1/admin', '/v1/admin/mail',
+      '/v1/verification', '/v1/notifications', '/v1/growth', '/v1/ws', '/health',
     ],
     timestamp: Date.now(),
   });
@@ -527,7 +528,7 @@ setInterval(async () => {
   }
 }, 30 * 60 * 1000); // Every 30 minutes
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   logger.info('BorealisMark Protocol API started', {
     port: PORT,
     env: process.env.NODE_ENV ?? 'development',
@@ -540,6 +541,14 @@ app.listen(PORT, () => {
   startAnchoringSchedule();
   initAdminNotifications();
   initNotificationListeners();
+
+  // v44: Initialize WebSocket server for bidirectional communication
+  try {
+    const { initWebSocket } = require('./services/websocket');
+    initWebSocket(server);
+  } catch (wsErr: any) {
+    logger.warn('WebSocket initialization skipped', { error: wsErr.message });
+  }
 
   // v40: Notification cleanup — sweep notifications older than 90 days every 24h
   const { deleteOldNotifications } = require('./db/database');

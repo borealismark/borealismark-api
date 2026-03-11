@@ -22,6 +22,8 @@ import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { v4 as uuid } from 'uuid';
 import { randomBytes } from 'crypto';
+import https from 'https';
+import http from 'http';
 import { requireAuth, type AuthRequest } from './auth';
 import { logger } from '../middleware/logger';
 import {
@@ -42,6 +44,111 @@ import { uploadToR2, isR2Enabled } from '../services/r2Storage';
 import { sendAdminVerificationNotification, sendVerificationResultEmail } from '../services/email';
 
 const router = Router();
+
+// ─── v44: Claude Vision API for Gov ID First-Pass Analysis ──────────────────
+
+/**
+ * Use Claude Vision to analyze a government ID image for:
+ * - Document type detection (passport, drivers license, national ID)
+ * - Readability assessment (is text visible? is photo clear?)
+ * - Potential fraud indicators (obvious photoshop, screen photo, etc.)
+ * - Extracted fields (name, DOB, ID number — partially redacted in logs)
+ *
+ * Returns analysis result. Non-blocking — failures don't prevent upload.
+ */
+async function analyzeDocumentWithVision(
+  imageBase64: string,
+  documentType: string,
+  country: string,
+): Promise<{ passed: boolean; confidence: number; analysis: string; flags: string[] }> {
+  const defaultResult = { passed: true, confidence: 0, analysis: 'Vision analysis unavailable', flags: [] };
+
+  if (!process.env.ANTHROPIC_API_KEY) {
+    return defaultResult;
+  }
+
+  try {
+    const Anthropic = (await import('@anthropic-ai/sdk')).default;
+    const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+    // Strip data URL prefix if present
+    const cleanBase64 = imageBase64.replace(/^data:image\/\w+;base64,/, '');
+    const mediaType = imageBase64.match(/^data:image\/([\w+]+);/)?.[1] || 'jpeg';
+
+    const response = await client.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 1024,
+      messages: [{
+        role: 'user',
+        content: [
+          {
+            type: 'image',
+            source: {
+              type: 'base64',
+              media_type: `image/${mediaType}` as any,
+              data: cleanBase64,
+            },
+          },
+          {
+            type: 'text',
+            text: `You are a document verification assistant for BorealisMark, a trust certification platform. Analyze this government ID image.
+
+Expected document type: ${documentType}
+Expected country: ${country}
+
+Evaluate and respond in JSON format ONLY:
+{
+  "passed": true/false,
+  "confidence": 0-100,
+  "documentTypeMatch": true/false,
+  "readability": "good" | "fair" | "poor",
+  "flags": ["list", "of", "concerns"],
+  "summary": "Brief assessment"
+}
+
+Check for:
+1. Is this actually a government-issued ID? (not a business card, student ID, etc.)
+2. Does the document type match what was declared?
+3. Is the image readable (not blurry, not too dark, text visible)?
+4. Are there obvious signs of tampering (visible editing artifacts, screen photo of a photo, etc.)?
+5. Does it appear to be from the declared country?
+
+Do NOT extract or output any PII (names, numbers, dates). Focus on document quality and legitimacy assessment only.
+Return ONLY the JSON object, no other text.`,
+          },
+        ],
+      }],
+    });
+
+    const text = response.content[0].type === 'text' ? response.content[0].text : '';
+
+    // Parse JSON from response
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      logger.warn('Vision API returned non-JSON response');
+      return defaultResult;
+    }
+
+    const result = JSON.parse(jsonMatch[0]);
+
+    logger.info('Document vision analysis complete', {
+      passed: result.passed,
+      confidence: result.confidence,
+      readability: result.readability,
+      flags: result.flags?.length || 0,
+    });
+
+    return {
+      passed: result.passed ?? true,
+      confidence: result.confidence ?? 0,
+      analysis: result.summary || 'Analysis complete',
+      flags: result.flags || [],
+    };
+  } catch (err: any) {
+    logger.error('Vision API analysis error', { error: err.message });
+    return defaultResult;
+  }
+}
 
 // ─── Rate limiting for verification actions (in-memory) ──────────────────────
 
@@ -265,6 +372,114 @@ function getSocialInstructions(platform: string, code: string): string {
     `This code expires in 48 hours.`;
 }
 
+// ─── v44: Automated Social Media Verification Check ──────────────────────────
+
+/**
+ * Attempt to verify that a verification code appears on the user's public profile/posts.
+ * Uses platform-specific API checks where possible, falls back to URL fetch.
+ * Returns { found: boolean, method: string, confidence: 'high' | 'medium' | 'low' }
+ */
+async function checkSocialPostForCode(
+  platform: string,
+  profileUrl: string,
+  verificationCode: string,
+): Promise<{ found: boolean; method: string; confidence: 'high' | 'medium' | 'low' }> {
+  try {
+    // For X/Twitter, check via public API if available
+    if (platform === 'x' && process.env.X_BEARER_TOKEN) {
+      return await checkXPost(profileUrl, verificationCode);
+    }
+
+    // Generic HTTP fetch — try to find the code on the public profile page
+    // This works for platforms that render post content in HTML (LinkedIn, Facebook public)
+    return await checkViaHttpFetch(profileUrl, verificationCode);
+  } catch (err: any) {
+    logger.warn('Social verification check failed, falling back to manual', {
+      platform, error: err.message,
+    });
+    return { found: false, method: 'error', confidence: 'low' };
+  }
+}
+
+async function checkXPost(profileUrl: string, code: string): Promise<{ found: boolean; method: string; confidence: 'high' | 'medium' | 'low' }> {
+  // Extract username from URL
+  const match = profileUrl.match(/(?:x|twitter)\.com\/([^\/\?]+)/i);
+  if (!match) return { found: false, method: 'x_api_no_username', confidence: 'low' };
+
+  const username = match[1];
+  const bearerToken = process.env.X_BEARER_TOKEN;
+
+  try {
+    // Search recent tweets from user containing the code
+    const searchUrl = `https://api.twitter.com/2/tweets/search/recent?query=from:${username} "${code}"&max_results=10`;
+
+    const response = await fetch(searchUrl, {
+      headers: { 'Authorization': `Bearer ${bearerToken}` },
+    });
+
+    if (!response.ok) {
+      logger.warn('X API request failed', { status: response.status });
+      return { found: false, method: 'x_api_error', confidence: 'low' };
+    }
+
+    const data = await response.json() as any;
+    const tweets = data.data || [];
+    const found = tweets.some((tweet: any) => tweet.text?.includes(code));
+
+    return { found, method: 'x_api', confidence: found ? 'high' : 'low' };
+  } catch (err: any) {
+    logger.error('X API check error', { error: err.message });
+    return { found: false, method: 'x_api_error', confidence: 'low' };
+  }
+}
+
+async function checkViaHttpFetch(profileUrl: string, code: string): Promise<{ found: boolean; method: string; confidence: 'high' | 'medium' | 'low' }> {
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      resolve({ found: false, method: 'http_timeout', confidence: 'low' });
+    }, 10000);
+
+    try {
+      const urlObj = new URL(profileUrl);
+      const protocol = urlObj.protocol === 'https:' ? https : http;
+
+      const req = protocol.get(profileUrl, {
+        headers: {
+          'User-Agent': 'BorealisMark-Verification/1.0',
+          'Accept': 'text/html',
+        },
+        timeout: 8000,
+      }, (res) => {
+        let body = '';
+        res.on('data', (chunk) => { body += chunk; });
+        res.on('end', () => {
+          clearTimeout(timeout);
+          const found = body.includes(code);
+          resolve({
+            found,
+            method: 'http_fetch',
+            confidence: found ? 'medium' : 'low',
+          });
+        });
+      });
+
+      req.on('error', () => {
+        clearTimeout(timeout);
+        resolve({ found: false, method: 'http_error', confidence: 'low' });
+      });
+
+      req.on('timeout', () => {
+        req.destroy();
+        clearTimeout(timeout);
+        resolve({ found: false, method: 'http_timeout', confidence: 'low' });
+      });
+    } catch {
+      clearTimeout(timeout);
+      resolve({ found: false, method: 'http_exception', confidence: 'low' });
+    }
+  });
+}
+
 // ─── POST /social/confirm — Confirm social media post was made ───────────────
 
 router.post('/social/confirm', requireAuth, async (req: Request, res: Response) => {
@@ -305,15 +520,36 @@ router.post('/social/confirm', requireAuth, async (req: Request, res: Response) 
       });
     }
 
-    // For social verification, we approve immediately upon user confirmation.
-    // In production, this would be enhanced with actual social media scraping/API checks.
-    // For now, social verifications go to a "confirmed" state that admins can spot-check.
-    // We grant trust points immediately to keep the UX smooth — if fraud is detected,
-    // the admin can revoke via the review endpoint.
+    // v44: Automated verification check — try to find the code on the profile
+    const checkResult = await checkSocialPostForCode(
+      verification.platform || 'unknown',
+      verification.profileUrl || '',
+      verification.verificationCode || '',
+    );
+
+    const autoApproved = checkResult.found && checkResult.confidence !== 'low';
+    const reviewNotes = autoApproved
+      ? `Auto-verified via ${checkResult.method} (confidence: ${checkResult.confidence}). Code found on public profile.`
+      : `User confirmed post. Automated check: ${checkResult.method} (found: ${checkResult.found}, confidence: ${checkResult.confidence}). Pending admin spot-check.`;
+
     updateVerificationStatus(verification.id, 'verified', {
       trustPoints: TRUST_POINTS.SOCIAL_MEDIA,
-      reviewNotes: 'User confirmed post. Auto-approved pending admin spot-check.',
+      reviewNotes,
     });
+
+    // Update metadata with check results
+    try {
+      const existingMeta = JSON.parse(verification.metadata || '{}');
+      const updatedMeta = {
+        ...existingMeta,
+        automatedCheck: checkResult,
+        autoApproved,
+        confirmedAt: Date.now(),
+      };
+      const { getDb } = require('../db/database');
+      getDb().prepare('UPDATE user_verifications SET metadata = ? WHERE id = ?')
+        .run(JSON.stringify(updatedMeta), verification.id);
+    } catch { /* non-critical */ }
 
     // Recompute trust score
     const trustScore = computeAndStoreTrustScore(userId);
@@ -437,6 +673,14 @@ router.post('/document/upload', requireAuth, async (req: Request, res: Response)
       }
     }
 
+    // v44: Run Claude Vision analysis (non-blocking — doesn't prevent upload)
+    let visionAnalysis = { passed: true, confidence: 0, analysis: 'Analysis not run', flags: [] as string[] };
+    try {
+      visionAnalysis = await analyzeDocumentWithVision(documentImageBase64, documentType, country);
+    } catch (visionErr: any) {
+      logger.error('Vision analysis failed', { error: visionErr.message, userId });
+    }
+
     const docMetadata = {
       documentType,
       country,
@@ -446,6 +690,14 @@ router.post('/document/upload', requireAuth, async (req: Request, res: Response)
       storageRef: documentStorageKey || `doc-${id}`,
       selfieStorageRef: selfieStorageKey || null,
       r2Enabled: isR2Enabled(),
+      // v44: AI analysis results
+      visionAnalysis: {
+        passed: visionAnalysis.passed,
+        confidence: visionAnalysis.confidence,
+        summary: visionAnalysis.analysis,
+        flags: visionAnalysis.flags,
+        analyzedAt: Date.now(),
+      },
     };
 
     createVerification({
@@ -846,6 +1098,131 @@ router.get('/admin/stats', requireAuth, (req: Request, res: Response) => {
   }
 });
 
+// ─── Admin Document Viewing (v44) ───────────────────────────────────────────
+
+// GET /admin/document/:verificationId — Get document image URL for admin review
+router.get('/admin/document/:verificationId', requireAuth, async (req: Request, res: Response) => {
+  const { role } = (req as any).user;
+  if (role !== 'admin') {
+    return res.status(403).json({ success: false, error: 'Admin access required' });
+  }
+
+  try {
+    const verification = getVerificationById(req.params.verificationId);
+    if (!verification) {
+      return res.status(404).json({ success: false, error: 'Verification not found' });
+    }
+    if (verification.verificationType !== 'government_id') {
+      return res.status(400).json({ success: false, error: 'Not a document verification' });
+    }
+
+    const metadata = JSON.parse(verification.metadata || '{}');
+
+    if (!metadata.storageRef || !isR2Enabled()) {
+      return res.status(404).json({ success: false, error: 'Document not available — R2 storage not configured or document not uploaded' });
+    }
+
+    // Import download function
+    const { downloadFromR2 } = require('../services/r2Storage');
+
+    // Download document image from R2 and stream as response
+    const documentBuffer = await downloadFromR2(metadata.storageRef);
+    const ext = metadata.storageRef.split('.').pop() || 'jpg';
+    const contentType = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg';
+
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Disposition', `inline; filename="doc-${req.params.verificationId}.${ext}"`);
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.send(documentBuffer);
+  } catch (err: any) {
+    logger.error('Admin document retrieval error', { error: err.message, verificationId: req.params.verificationId });
+    res.status(500).json({ success: false, error: 'Failed to retrieve document' });
+  }
+});
+
+// GET /admin/document/:verificationId/selfie — Get selfie image for admin review
+router.get('/admin/document/:verificationId/selfie', requireAuth, async (req: Request, res: Response) => {
+  const { role } = (req as any).user;
+  if (role !== 'admin') {
+    return res.status(403).json({ success: false, error: 'Admin access required' });
+  }
+
+  try {
+    const verification = getVerificationById(req.params.verificationId);
+    if (!verification) {
+      return res.status(404).json({ success: false, error: 'Verification not found' });
+    }
+
+    const metadata = JSON.parse(verification.metadata || '{}');
+
+    if (!metadata.selfieStorageRef || !isR2Enabled()) {
+      return res.status(404).json({ success: false, error: 'Selfie not available' });
+    }
+
+    const { downloadFromR2 } = require('../services/r2Storage');
+    const selfieBuffer = await downloadFromR2(metadata.selfieStorageRef);
+    const ext = metadata.selfieStorageRef.split('.').pop() || 'jpg';
+    const contentType = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg';
+
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Disposition', `inline; filename="selfie-${req.params.verificationId}.${ext}"`);
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.send(selfieBuffer);
+  } catch (err: any) {
+    logger.error('Admin selfie retrieval error', { error: err.message });
+    res.status(500).json({ success: false, error: 'Failed to retrieve selfie' });
+  }
+});
+
+// ─── Document Cleanup: Delete R2 objects for rejected verifications (v44) ────
+async function cleanupRejectedDocuments(): Promise<void> {
+  try {
+    if (!isR2Enabled()) return;
+
+    const { getDb } = require('../db/database');
+    const { deleteFromR2 } = require('../services/r2Storage');
+    const db = getDb();
+
+    // Find rejected verifications older than 30 days with R2 storage refs
+    const thirtyDaysAgo = Date.now() - (30 * 24 * 60 * 60 * 1000);
+    const rejected = db.prepare(`
+      SELECT id, metadata FROM user_verifications
+      WHERE verification_type = 'government_id'
+        AND status = 'rejected'
+        AND verified_at < ?
+    `).all(thirtyDaysAgo) as Array<{ id: string; metadata: string }>;
+
+    let cleaned = 0;
+    for (const v of rejected) {
+      try {
+        const meta = JSON.parse(v.metadata || '{}');
+        if (meta.storageRef && meta.r2Enabled) {
+          await deleteFromR2(meta.storageRef);
+          if (meta.selfieStorageRef) await deleteFromR2(meta.selfieStorageRef);
+          // Update metadata to mark as cleaned
+          const updatedMeta = { ...meta, r2Cleaned: true, cleanedAt: Date.now() };
+          db.prepare('UPDATE user_verifications SET metadata = ? WHERE id = ?')
+            .run(JSON.stringify(updatedMeta), v.id);
+          cleaned++;
+        }
+      } catch (cleanErr: any) {
+        logger.error('Failed to clean up document', { verificationId: v.id, error: cleanErr.message });
+      }
+    }
+
+    if (cleaned > 0) {
+      logger.info('Cleaned up rejected verification documents from R2', { count: cleaned });
+    }
+  } catch (err: any) {
+    logger.error('Document cleanup error', { error: err.message });
+  }
+}
+
+// Run cleanup every 24 hours
+setInterval(cleanupRejectedDocuments, 24 * 60 * 60 * 1000);
+// Run once on startup after 2 minutes
+setTimeout(cleanupRejectedDocuments, 120_000);
+
 // ─── Auto-expire stale pending social verifications (v38) ─────────────────────
 
 function sweepExpiredVerifications(): void {
@@ -874,5 +1251,144 @@ function sweepExpiredVerifications(): void {
 setInterval(sweepExpiredVerifications, 6 * 60 * 60 * 1000);
 // Run once on startup after a short delay
 setTimeout(sweepExpiredVerifications, 30_000);
+
+// ─── v44: Trust Score Leaderboard ─────────────────────────────────────────────
+
+// GET /leaderboard — Public trust score rankings
+router.get('/leaderboard', (_req: Request, res: Response) => {
+  try {
+    const limit = Math.min(100, Math.max(1, Number(_req.query.limit) || 25));
+    const page = Math.max(1, Number(_req.query.page) || 1);
+    const offset = (page - 1) * limit;
+
+    const { getDb } = require('../db/database');
+    const db = getDb();
+
+    const leaderboard = db.prepare(`
+      SELECT
+        u.id as user_id,
+        u.name,
+        u.created_at as member_since,
+        uts.total_score,
+        uts.trust_level,
+        uts.email_verified,
+        uts.social_verified,
+        uts.document_verified,
+        uts.transaction_count,
+        uts.hedera_tx_count,
+        uts.stripe_tx_count,
+        uts.account_age_days,
+        sf.store_name,
+        sf.slug as store_slug,
+        (SELECT COUNT(*) FROM marketplace_listings ml WHERE ml.user_id = u.id AND ml.status = 'published') as active_listings,
+        (SELECT COUNT(*) FROM marketplace_orders mo WHERE (mo.buyer_id = u.id OR mo.seller_id = u.id) AND mo.status = 'settled') as settled_orders
+      FROM user_trust_scores uts
+      JOIN users u ON uts.user_id = u.id
+      LEFT JOIN seller_storefronts sf ON u.id = sf.user_id
+      WHERE u.active = 1
+        AND uts.total_score > 0
+      ORDER BY uts.total_score DESC, uts.last_computed_at ASC
+      LIMIT ? OFFSET ?
+    `).all(limit, offset) as any[];
+
+    const totalResult = db.prepare(`
+      SELECT COUNT(*) as total FROM user_trust_scores uts
+      JOIN users u ON uts.user_id = u.id
+      WHERE u.active = 1 AND uts.total_score > 0
+    `).get() as { total: number };
+
+    // Add rank numbers
+    const ranked = leaderboard.map((entry: any, idx: number) => ({
+      rank: offset + idx + 1,
+      userId: entry.user_id,
+      name: entry.name || 'Anonymous',
+      memberSince: entry.member_since,
+      trustScore: entry.total_score,
+      trustLevel: entry.trust_level,
+      badges: {
+        emailVerified: !!entry.email_verified,
+        socialVerified: entry.social_verified,
+        documentVerified: !!entry.document_verified,
+      },
+      stats: {
+        transactionCount: entry.transaction_count,
+        hederaTxCount: entry.hedera_tx_count,
+        activeDays: entry.account_age_days,
+        activeListings: entry.active_listings,
+        settledOrders: entry.settled_orders,
+      },
+      storefront: entry.store_name ? {
+        name: entry.store_name,
+        slug: entry.store_slug,
+      } : null,
+    }));
+
+    res.json({
+      success: true,
+      data: {
+        leaderboard: ranked,
+        pagination: {
+          page,
+          limit,
+          total: totalResult.total,
+          totalPages: Math.ceil(totalResult.total / limit),
+        },
+      },
+    });
+  } catch (err: any) {
+    logger.error('Leaderboard error', { error: err.message });
+    res.status(500).json({ success: false, error: 'Failed to fetch leaderboard' });
+  }
+});
+
+// GET /leaderboard/stats — Trust ecosystem summary stats
+router.get('/leaderboard/stats', (_req: Request, res: Response) => {
+  try {
+    const { getDb } = require('../db/database');
+    const db = getDb();
+
+    const stats = db.prepare(`
+      SELECT
+        COUNT(*) as total_users,
+        AVG(total_score) as avg_score,
+        MAX(total_score) as max_score,
+        SUM(CASE WHEN trust_level = 'elite' THEN 1 ELSE 0 END) as elite_count,
+        SUM(CASE WHEN trust_level = 'premium' THEN 1 ELSE 0 END) as premium_count,
+        SUM(CASE WHEN trust_level = 'trusted' THEN 1 ELSE 0 END) as trusted_count,
+        SUM(CASE WHEN trust_level = 'verified' THEN 1 ELSE 0 END) as verified_count,
+        SUM(CASE WHEN trust_level = 'basic' THEN 1 ELSE 0 END) as basic_count,
+        SUM(CASE WHEN trust_level = 'unverified' THEN 1 ELSE 0 END) as unverified_count,
+        SUM(CASE WHEN document_verified = 1 THEN 1 ELSE 0 END) as gov_id_verified,
+        SUM(social_verified) as total_social_verifications,
+        SUM(transaction_count) as total_transactions
+      FROM user_trust_scores
+    `).get() as any;
+
+    res.json({
+      success: true,
+      data: {
+        totalUsers: stats.total_users || 0,
+        averageScore: Math.round(stats.avg_score || 0),
+        maxScore: stats.max_score || 0,
+        distribution: {
+          elite: stats.elite_count || 0,
+          premium: stats.premium_count || 0,
+          trusted: stats.trusted_count || 0,
+          verified: stats.verified_count || 0,
+          basic: stats.basic_count || 0,
+          unverified: stats.unverified_count || 0,
+        },
+        milestones: {
+          govIdVerified: stats.gov_id_verified || 0,
+          totalSocialVerifications: stats.total_social_verifications || 0,
+          totalTransactions: stats.total_transactions || 0,
+        },
+      },
+    });
+  } catch (err: any) {
+    logger.error('Leaderboard stats error', { error: err.message });
+    res.status(500).json({ success: false, error: 'Failed to fetch leaderboard stats' });
+  }
+});
 
 export default router;

@@ -444,7 +444,7 @@ export function initNotificationListeners(): void {
   // Order events → notify buyer and seller
   onEvent(EventTypes.ORDER_PAYMENT_RECEIVED, async (event) => {
     try {
-      const { createNotification, getNotificationPreferences } = await import('../db/database');
+      const { createNotification, getNotificationPreferences, getUserById } = await import('../db/database');
       const { pushToUser } = await import('../routes/notifications');
       const sellerId = event.payload?.sellerId;
       if (sellerId) {
@@ -460,6 +460,18 @@ export function initNotificationListeners(): void {
           });
           pushToUser(sellerId, { event: 'notification', ...notif });
         }
+        // Send email if preference enabled
+        if (prefs.emailOrders) {
+          try {
+            const { sendOrderNotificationEmail } = await import('./email');
+            const user = getUserById(sellerId);
+            if (user) {
+              await sendOrderNotificationEmail(user.email, user.name ?? user.email, 'payment_received', 'A buyer has deposited payment for your listing.');
+            }
+          } catch (emailErr: any) {
+            logger.error('Order email notification failed', { error: emailErr.message });
+          }
+        }
       }
     } catch (err: any) {
       logger.error('Order notification error', { error: err.message });
@@ -468,7 +480,7 @@ export function initNotificationListeners(): void {
 
   onEvent(EventTypes.ORDER_SHIPPED, async (event) => {
     try {
-      const { createNotification, getNotificationPreferences } = await import('../db/database');
+      const { createNotification, getNotificationPreferences, getUserById } = await import('../db/database');
       const { pushToUser } = await import('../routes/notifications');
       const buyerId = event.payload?.buyerId;
       if (buyerId) {
@@ -484,6 +496,18 @@ export function initNotificationListeners(): void {
           });
           pushToUser(buyerId, { event: 'notification', ...notif });
         }
+        // Send email if preference enabled
+        if (prefs.emailOrders) {
+          try {
+            const { sendOrderNotificationEmail } = await import('./email');
+            const user = getUserById(buyerId);
+            if (user) {
+              await sendOrderNotificationEmail(user.email, user.name ?? user.email, 'order_shipped', 'Your order has been shipped! Track your package and confirm delivery when it arrives.');
+            }
+          } catch (emailErr: any) {
+            logger.error('Order email notification failed', { error: emailErr.message });
+          }
+        }
       }
     } catch (err: any) {
       logger.error('Shipped notification error', { error: err.message });
@@ -492,7 +516,7 @@ export function initNotificationListeners(): void {
 
   onEvent(EventTypes.ORDER_SETTLED, async (event) => {
     try {
-      const { createNotification, getNotificationPreferences } = await import('../db/database');
+      const { createNotification, getNotificationPreferences, getUserById } = await import('../db/database');
       const { pushToUser } = await import('../routes/notifications');
       const { buyerId, sellerId, totalUsdc } = event.payload ?? {};
       const amount = totalUsdc ? ` (${Number(totalUsdc).toFixed(2)} USDC)` : '';
@@ -513,6 +537,22 @@ export function initNotificationListeners(): void {
           });
           pushToUser(uid, { event: 'notification', ...notif });
         }
+        // Send email if preference enabled
+        if (prefs.emailOrders) {
+          try {
+            const { sendOrderNotificationEmail } = await import('./email');
+            const user = getUserById(uid);
+            if (user) {
+              const isSeller = uid === sellerId;
+              const message = isSeller
+                ? `Your sale has been settled${amount}. Funds are being released to your account.`
+                : `Your purchase has been settled${amount}. Transaction complete!`;
+              await sendOrderNotificationEmail(user.email, user.name ?? user.email, 'order_settled', message);
+            }
+          } catch (emailErr: any) {
+            logger.error('Order email notification failed', { error: emailErr.message });
+          }
+        }
       }
     } catch (err: any) {
       logger.error('Settlement notification error', { error: err.message });
@@ -522,7 +562,7 @@ export function initNotificationListeners(): void {
   // Verification events → notify user
   onEvent(EventTypes.USER_VERIFIED, async (event) => {
     try {
-      const { createNotification, getNotificationPreferences } = await import('../db/database');
+      const { createNotification, getNotificationPreferences, getUserById } = await import('../db/database');
       const { pushToUser } = await import('../routes/notifications');
       const userId = event.actorId;
       if (userId) {
@@ -538,6 +578,18 @@ export function initNotificationListeners(): void {
           });
           pushToUser(userId, { event: 'notification', ...notif });
         }
+        // Send email if preference enabled
+        if (prefs.emailVerification) {
+          try {
+            const { sendVerificationNotificationEmail } = await import('./email');
+            const user = getUserById(userId);
+            if (user) {
+              await sendVerificationNotificationEmail(user.email, user.name ?? user.email, 'Your email has been verified. You earned trust points!');
+            }
+          } catch (emailErr: any) {
+            logger.error('Verification email notification failed', { error: emailErr.message });
+          }
+        }
       }
     } catch (err: any) {
       logger.error('Verification notification error', { error: err.message });
@@ -547,13 +599,13 @@ export function initNotificationListeners(): void {
   // Payment events → notify user
   onEvent(EventTypes.SUBSCRIPTION_CREATED, async (event) => {
     try {
-      const { createNotification, getNotificationPreferences } = await import('../db/database');
+      const { createNotification, getNotificationPreferences, getUserById } = await import('../db/database');
       const { pushToUser } = await import('../routes/notifications');
       const userId = event.actorId;
       if (userId) {
         const prefs = getNotificationPreferences(userId);
+        const tier = event.payload?.tier ?? 'Pro';
         if (prefs.inappPayment) {
-          const tier = event.payload?.tier ?? 'Pro';
           const notif = createNotification({
             userId,
             type: 'payment',
@@ -564,6 +616,18 @@ export function initNotificationListeners(): void {
           });
           pushToUser(userId, { event: 'notification', ...notif });
         }
+        // Send email if preference enabled
+        if (prefs.emailPayment) {
+          try {
+            const { sendPaymentNotificationEmail } = await import('./email');
+            const user = getUserById(userId);
+            if (user) {
+              await sendPaymentNotificationEmail(user.email, user.name ?? user.email, 'subscription_created', `Your ${tier} subscription is now active. Enjoy your upgraded features!`);
+            }
+          } catch (emailErr: any) {
+            logger.error('Subscription email notification failed', { error: emailErr.message });
+          }
+        }
       }
     } catch (err: any) {
       logger.error('Subscription notification error', { error: err.message });
@@ -572,7 +636,7 @@ export function initNotificationListeners(): void {
 
   onEvent(EventTypes.SUBSCRIPTION_EXPIRED, async (event) => {
     try {
-      const { createNotification, getNotificationPreferences } = await import('../db/database');
+      const { createNotification, getNotificationPreferences, getUserById } = await import('../db/database');
       const { pushToUser } = await import('../routes/notifications');
       const userId = event.actorId;
       if (userId) {
@@ -587,6 +651,18 @@ export function initNotificationListeners(): void {
             link: `/dashboard/settings`,
           });
           pushToUser(userId, { event: 'notification', ...notif });
+        }
+        // Send email if preference enabled
+        if (prefs.emailPayment) {
+          try {
+            const { sendPaymentNotificationEmail } = await import('./email');
+            const user = getUserById(userId);
+            if (user) {
+              await sendPaymentNotificationEmail(user.email, user.name ?? user.email, 'subscription_expired', 'Your subscription has expired. Renew to keep your premium features.');
+            }
+          } catch (emailErr: any) {
+            logger.error('Subscription email notification failed', { error: emailErr.message });
+          }
         }
       }
     } catch (err: any) {

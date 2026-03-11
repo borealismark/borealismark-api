@@ -121,6 +121,61 @@ const RatingSchema = z.object({
   comment: z.string().max(1000).optional(),
 });
 
+// ─── v44: Trust-Gated Feature Helpers ────────────────────────────────────────
+
+/**
+ * Trust level gates for marketplace features.
+ * Higher trust = more visibility and capabilities.
+ */
+const TRUST_GATES = {
+  createListing: 'basic',        // Must have at least basic trust to list
+  sendMessages: 'basic',         // Must have basic trust to message
+  makeOffer: 'verified',         // Must be verified to make offers
+  featuredListing: 'trusted',    // Trusted+ gets featured placement
+  unlimitedListings: 'premium',  // Premium+ gets unlimited listings
+  exportData: 'verified',        // Verified+ can export their data
+} as const;
+
+const TRUST_LEVEL_ORDER = ['unverified', 'basic', 'verified', 'trusted', 'premium', 'elite'];
+
+function meetsMinTrustLevel(userLevel: string, requiredLevel: string): boolean {
+  const userIdx = TRUST_LEVEL_ORDER.indexOf(userLevel);
+  const requiredIdx = TRUST_LEVEL_ORDER.indexOf(requiredLevel);
+  return userIdx >= requiredIdx;
+}
+
+/**
+ * Get listing limit based on trust level.
+ * Higher trust = more concurrent active listings.
+ */
+function getListingLimit(trustLevel: string): number {
+  const limits: Record<string, number> = {
+    unverified: 2,
+    basic: 5,
+    verified: 15,
+    trusted: 30,
+    premium: 100,
+    elite: 999,
+  };
+  return limits[trustLevel] || 2;
+}
+
+/**
+ * Get trust boost multiplier for search ranking.
+ * Higher trust listings appear higher in search results.
+ */
+function getTrustBoost(trustLevel: string): number {
+  const boosts: Record<string, number> = {
+    unverified: 1.0,
+    basic: 1.1,
+    verified: 1.3,
+    trusted: 1.5,
+    premium: 1.8,
+    elite: 2.0,
+  };
+  return boosts[trustLevel] || 1.0;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // ─── LISTINGS ────────────────────────────────────────────────────────────────
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -139,6 +194,33 @@ router.post('/listings', requireAuth, async (req: Request, res: Response) => {
     const authReq = req as AuthRequest;
     const userId = authReq.user?.sub;
     if (!userId) return res.status(401).json({ success: false, error: 'Not authenticated' });
+
+    // v44: Trust-gated listing creation
+    const userTrustLevel = getUserTrustLevel(userId);
+    if (!meetsMinTrustLevel(userTrustLevel, TRUST_GATES.createListing)) {
+      return res.status(403).json({
+        success: false,
+        error: 'You need at least "Basic" trust level to create listings. Verify your email to get started.',
+        requiredTrust: TRUST_GATES.createListing,
+        currentTrust: userTrustLevel,
+      });
+    }
+
+    // Check listing limit based on trust level
+    const listingLimit = getListingLimit(userTrustLevel);
+    const activeCount = getDb().prepare(
+      "SELECT COUNT(*) as cnt FROM marketplace_listings WHERE user_id = ? AND status NOT IN ('rejected', 'sold', 'deleted')"
+    ).get(userId) as { cnt: number };
+
+    if (activeCount.cnt >= listingLimit) {
+      return res.status(403).json({
+        success: false,
+        error: `You've reached your listing limit (${listingLimit}). Increase your trust level to list more items.`,
+        limit: listingLimit,
+        current: activeCount.cnt,
+        trustLevel: userTrustLevel,
+      });
+    }
 
     const parsed = ListingCreateSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -303,103 +385,147 @@ router.get('/category-counts', async (_req: Request, res: Response) => {
 });
 
 /**
- * GET /v1/marketplace/listings — Browse published listings
+ * GET /v1/marketplace/listings — Browse published listings with advanced search
  */
 router.get('/listings', async (req: Request, res: Response) => {
   try {
-    const type = req.query.type as string;
+    // v44: Advanced search and filtering
+    const q = (req.query.q as string || '').trim();
     const category = req.query.category as string;
-    const search = req.query.q as string;
-    const maxPrice = req.query.maxPrice ? Number(req.query.maxPrice) : undefined;
-    const platform = req.query.platform as string;
+    const listingType = req.query.listingType as string;
+    const minPrice = parseFloat(req.query.minPrice as string) || 0;
+    const maxPrice = parseFloat(req.query.maxPrice as string) || 0;
     const condition = req.query.condition as string;
-    const storefront = req.query.storefront as string;
-    const page = Math.max(1, Number(req.query.page) || 1);
-    const allowedLimits = [20, 40, 60, 80, 100];
-    const rawLimit = Number(req.query.limit) || 20;
-    const limit = allowedLimits.includes(rawLimit) ? rawLimit : Math.min(100, Math.max(1, rawLimit));
+    const sort = req.query.sort as string || 'newest';
+    const minTrustLevel = req.query.trustLevel as string;
+    const storeId = req.query.storeId as string;
+    const page = Math.max(1, parseInt(req.query.page as string) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 24));
+    const offset = (page - 1) * limit;
 
-    let query = `SELECT l.*, u.name as seller_name, u.email as seller_email, u.tier as seller_tier, u.created_at as seller_created_at,
-                 (SELECT COUNT(*) FROM listing_likes WHERE listing_id = l.id) as like_count,
-                 (SELECT COUNT(*) FROM user_watchlist WHERE listing_id = l.id) as watch_count
-                 FROM marketplace_listings l
-                 JOIN users u ON l.user_id = u.id
-                 WHERE l.status = 'published'`;
+    let where = "l.status = 'published'";
     const params: any[] = [];
 
-    if (type) {
-      query += ` AND l.listing_type = ?`;
-      params.push(type);
+    if (q) {
+      where += " AND (l.title LIKE ? OR l.description LIKE ?)";
+      params.push(`%${q}%`, `%${q}%`);
     }
     if (category) {
-      query += ` AND l.category = ?`;
+      where += " AND l.category = ?";
       params.push(category);
     }
-    if (search) {
-      query += ` AND (l.title LIKE ? OR l.description LIKE ?)`;
-      params.push(`%${search}%`, `%${search}%`);
+    if (listingType) {
+      where += " AND l.listing_type = ?";
+      params.push(listingType);
     }
-    if (maxPrice !== undefined) {
-      query += ` AND l.price_usdc <= ?`;
-      params.push(maxPrice);
+    if (minPrice > 0) {
+      where += " AND (l.price_cad >= ? OR l.price_usdc >= ?)";
+      params.push(minPrice, minPrice);
     }
-    if (platform) {
-      query += ` AND l.platform = ?`;
-      params.push(platform);
+    if (maxPrice > 0) {
+      where += " AND (l.price_cad <= ? OR l.price_usdc <= ?)";
+      params.push(maxPrice, maxPrice);
     }
     if (condition) {
-      query += ` AND l.condition = ?`;
+      where += " AND l.condition = ?";
       params.push(condition);
     }
-    if (storefront) {
-      query += ` AND l.user_id = ?`;
-      params.push(storefront);
+    if (minTrustLevel) {
+      const minIdx = TRUST_LEVEL_ORDER.indexOf(minTrustLevel);
+      if (minIdx >= 0) {
+        const validLevels = TRUST_LEVEL_ORDER.slice(minIdx);
+        where += ` AND uts.trust_level IN (${validLevels.map(() => '?').join(',')})`;
+        params.push(...validLevels);
+      }
+    }
+    if (storeId) {
+      where += " AND EXISTS (SELECT 1 FROM seller_storefronts s WHERE s.user_id = l.user_id AND s.id = ?)";
+      params.push(storeId);
     }
 
-    // Count
-    const countQuery = query.replace(/SELECT l\.\*, u\.name as seller_name, u\.email as seller_email/, 'SELECT COUNT(*) as total');
-    const { total } = getDb().prepare(countQuery).get(...params) as any;
+    // Sort order
+    let orderBy = 'l.published_at DESC';
+    switch (sort) {
+      case 'oldest': orderBy = 'l.published_at ASC'; break;
+      case 'price_low': orderBy = 'COALESCE(l.price_cad, l.price_usdc) ASC'; break;
+      case 'price_high': orderBy = 'COALESCE(l.price_cad, l.price_usdc) DESC'; break;
+      case 'popular': orderBy = 'l.view_count DESC'; break;
+      case 'newest': default: orderBy = 'l.published_at DESC'; break;
+    }
 
-    query += ` ORDER BY l.created_at DESC LIMIT ? OFFSET ?`;
-    params.push(limit, (page - 1) * limit);
+    // Count total results
+    const countQuery = `SELECT COUNT(*) as total FROM marketplace_listings l LEFT JOIN user_trust_scores uts ON l.user_id = uts.user_id WHERE ${where}`;
+    const totalResult = getDb().prepare(countQuery).get(...params) as { total: number };
 
-    const listings = getDb().prepare(query).all(...params) as any[];
+    // Fetch results with trust data
+    const query = `
+      SELECT l.*,
+        uts.trust_level as seller_trust_level,
+        uts.total_score as seller_trust_score,
+        u.name as seller_name,
+        sf.store_name as seller_store_name,
+        sf.slug as seller_store_slug,
+        (SELECT COUNT(*) FROM listing_likes ll WHERE ll.listing_id = l.id) as like_count
+      FROM marketplace_listings l
+      LEFT JOIN user_trust_scores uts ON l.user_id = uts.user_id
+      LEFT JOIN users u ON l.user_id = u.id
+      LEFT JOIN seller_storefronts sf ON l.user_id = sf.user_id
+      WHERE ${where}
+      ORDER BY ${orderBy}
+      LIMIT ? OFFSET ?
+    `;
+    const listings = getDb().prepare(query).all(...params, limit, offset) as any[];
 
     res.json({
       success: true,
       data: {
-        listings: listings.map(l => ({
-          id: l.id,
-          userId: l.user_id,
-          title: l.title,
-          description: l.description,
-          listingType: l.listing_type,
-          category: l.category,
-          priceUsdc: l.price_usdc,
-          priceCad: l.price_cad,
-          shippingCostCad: l.shipping_cost_cad || 0,
-          tradeFor: l.trade_for,
-          tags: JSON.parse(l.tags || '[]'),
-          condition: l.condition,
-          platform: l.platform,
-          sku: l.sku,
-          externalUrl: l.external_url,
-          externalSource: l.external_source,
-          sellerName: l.seller_name,
-          sellerId: l.user_id,
-          sellerTier: l.seller_tier || 'standard',
-          sellerVerified: l.seller_tier === 'pro' || l.seller_tier === 'elite',
-          sellerTrustLevel: getUserTrustLevel(l.user_id),
-          sellerAge: Math.floor((Date.now() - (l.seller_created_at || Date.now())) / (1000 * 60 * 60 * 24)),
-          likeCount: l.like_count || 0,
-          watchCount: l.watch_count || 0,
-          viewCount: l.view_count,
-          hasAgent: !!l.assigned_agent_id,
-          createdAt: l.created_at,
-          publishedAt: l.published_at,
-          images: JSON.parse(l.images || '[]'),
-        })),
-        pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+        listings: listings.map(l => {
+          const trustLevel = l.seller_trust_level || 'unverified';
+          const trustBoost = getTrustBoost(trustLevel);
+          return {
+            id: l.id,
+            userId: l.user_id,
+            title: l.title,
+            description: l.description,
+            listingType: l.listing_type,
+            category: l.category,
+            priceUsdc: l.price_usdc,
+            priceCad: l.price_cad,
+            shippingCostCad: l.shipping_cost_cad || 0,
+            tradeFor: l.trade_for,
+            tags: JSON.parse(l.tags || '[]'),
+            condition: l.condition,
+            platform: l.platform,
+            sku: l.sku,
+            externalUrl: l.external_url,
+            externalSource: l.external_source,
+            sellerName: l.seller_name,
+            sellerId: l.user_id,
+            sellerTrustLevel: trustLevel,
+            sellerTrustScore: l.seller_trust_score || 0,
+            sellerStorefront: l.seller_store_name ? {
+              name: l.seller_store_name,
+              slug: l.seller_store_slug,
+            } : null,
+            trustBoost,
+            likeCount: l.like_count || 0,
+            viewCount: l.view_count,
+            hasAgent: !!l.assigned_agent_id,
+            createdAt: l.created_at,
+            publishedAt: l.published_at,
+            images: JSON.parse(l.images || '[]'),
+          };
+        }),
+        pagination: { page, limit, total: totalResult.total, totalPages: Math.ceil(totalResult.total / limit) },
+        searchParams: {
+          query: q || undefined,
+          category: category || undefined,
+          listingType: listingType || undefined,
+          priceRange: (minPrice > 0 || maxPrice > 0) ? { min: minPrice, max: maxPrice } : undefined,
+          condition: condition || undefined,
+          minTrustLevel: minTrustLevel || undefined,
+          sort,
+        },
       },
     });
   } catch (err: any) {
@@ -1136,6 +1262,15 @@ router.post('/threads/:id/messages', requireAuth, async (req: Request, res: Resp
   try {
     const authReq = req as AuthRequest;
     const userId = authReq.user?.sub;
+
+    // v44: Trust-gated messaging
+    const senderTrustLevel = getUserTrustLevel(userId!);
+    if (!meetsMinTrustLevel(senderTrustLevel, TRUST_GATES.sendMessages)) {
+      return res.status(403).json({
+        success: false,
+        error: 'You need at least "Basic" trust level to send messages. Verify your email to get started.',
+      });
+    }
 
     // ─── Step 1: Check user sanction status ─────────────────────────────────
     const sanction = getUserSanction(userId!);

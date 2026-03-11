@@ -248,4 +248,57 @@ router.patch('/preferences', requireAuth, (req: Request, res: Response) => {
   }
 });
 
+// ─── v44: Web Push Subscription Management ──────────────────────────────────
+
+router.get('/push/vapid-key', (_req: Request, res: Response) => {
+  try {
+    const { getVapidPublicKey, isWebPushEnabled } = require('../services/webpush');
+    const key = getVapidPublicKey();
+    res.json({
+      success: true,
+      data: { vapidPublicKey: key, enabled: isWebPushEnabled() },
+    });
+  } catch (err: any) {
+    res.json({ success: true, data: { vapidPublicKey: null, enabled: false } });
+  }
+});
+
+router.post('/push/subscribe', requireAuth, (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).userId;
+    const { subscription } = req.body;
+
+    if (!subscription || !subscription.endpoint || !subscription.keys?.p256dh || !subscription.keys?.auth) {
+      return res.status(400).json({ success: false, error: 'Invalid push subscription object' });
+    }
+
+    const { saveSubscription, ensurePushSchema } = require('../services/webpush');
+    ensurePushSchema();
+    saveSubscription(userId, subscription, req.headers['user-agent'] || '');
+
+    res.json({ success: true, data: { message: 'Push subscription saved' } });
+  } catch (err: any) {
+    logger.error('Push subscribe error', { error: err.message });
+    res.status(500).json({ success: false, error: 'Failed to save push subscription' });
+  }
+});
+
+router.post('/push/unsubscribe', requireAuth, (req: Request, res: Response) => {
+  try {
+    const { endpoint } = req.body;
+    if (!endpoint) {
+      return res.status(400).json({ success: false, error: 'Endpoint required' });
+    }
+
+    const { removeSubscription, ensurePushSchema } = require('../services/webpush');
+    ensurePushSchema();
+    removeSubscription(endpoint);
+
+    res.json({ success: true, data: { message: 'Push subscription removed' } });
+  } catch (err: any) {
+    logger.error('Push unsubscribe error', { error: err.message });
+    res.status(500).json({ success: false, error: 'Failed to remove subscription' });
+  }
+});
+
 export default router;

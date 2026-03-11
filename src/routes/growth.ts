@@ -239,4 +239,212 @@ router.get('/revenue', requireAuth, requireAdmin, (req: Request, res: Response) 
   }
 });
 
+// ─── v44: GET /v1/growth/dashboard — Combined dashboard data (all KPIs in one call) ───
+
+router.get('/dashboard', requireAuth, (req: Request, res: Response) => {
+  const { role } = (req as any).user;
+  if (role !== 'admin') {
+    return res.status(403).json({ success: false, error: 'Admin access required' });
+  }
+
+  try {
+    const db = getDb();
+    const now = Date.now();
+    const dayMs = 24 * 60 * 60 * 1000;
+    const today = Math.floor(now / dayMs) * dayMs;
+    const thirtyDaysAgo = today - (30 * dayMs);
+    const sevenDaysAgo = today - (7 * dayMs);
+
+    // User growth (last 30 days, daily)
+    const userGrowth = db.prepare(`
+      SELECT
+        CAST((created_at / ${dayMs}) AS INTEGER) * ${dayMs} as day,
+        COUNT(*) as signups
+      FROM users
+      WHERE created_at >= ?
+      GROUP BY day
+      ORDER BY day ASC
+    `).all(thirtyDaysAgo) as any[];
+
+    // Revenue (last 30 days)
+    const revenue = db.prepare(`
+      SELECT
+        CAST((created_at / ${dayMs}) AS INTEGER) * ${dayMs} as day,
+        SUM(total_usdc) as daily_revenue,
+        COUNT(*) as order_count,
+        SUM(CASE WHEN settlement_type = 'hedera' THEN total_usdc ELSE 0 END) as hedera_revenue,
+        SUM(CASE WHEN settlement_type = 'stripe' THEN total_usdc ELSE 0 END) as stripe_revenue
+      FROM marketplace_orders
+      WHERE status = 'settled' AND settled_at >= ?
+      GROUP BY day
+      ORDER BY day ASC
+    `).all(thirtyDaysAgo) as any[];
+
+    // Active users (7-day and 30-day)
+    const dau7 = db.prepare(`
+      SELECT COUNT(DISTINCT user_id) as count FROM user_login_days
+      WHERE login_date >= date(?, 'unixepoch')
+    `).get(Math.floor(sevenDaysAgo / 1000)) as { count: number };
+
+    const dau30 = db.prepare(`
+      SELECT COUNT(DISTINCT user_id) as count FROM user_login_days
+      WHERE login_date >= date(?, 'unixepoch')
+    `).get(Math.floor(thirtyDaysAgo / 1000)) as { count: number };
+
+    // Listing activity
+    const listingActivity = db.prepare(`
+      SELECT
+        SUM(CASE WHEN status = 'published' THEN 1 ELSE 0 END) as published,
+        SUM(CASE WHEN status = 'pending_audit' THEN 1 ELSE 0 END) as pending,
+        SUM(CASE WHEN status = 'sold' THEN 1 ELSE 0 END) as sold,
+        COUNT(*) as total
+      FROM marketplace_listings
+    `).get() as any;
+
+    // Trust metrics
+    const trustMetrics = db.prepare(`
+      SELECT
+        AVG(total_score) as avg_score,
+        SUM(CASE WHEN document_verified = 1 THEN 1 ELSE 0 END) as gov_verified,
+        SUM(social_verified) as social_verifications,
+        COUNT(*) as scored_users
+      FROM user_trust_scores
+    `).get() as any;
+
+    // Notification delivery stats
+    const notifStats = db.prepare(`
+      SELECT
+        COUNT(*) as total_sent,
+        SUM(CASE WHEN read = 1 THEN 1 ELSE 0 END) as total_read
+      FROM user_notifications
+      WHERE created_at >= ?
+    `).get(sevenDaysAgo) as any;
+
+    // Support metrics
+    const supportMetrics = db.prepare(`
+      SELECT
+        COUNT(*) as total_threads,
+        SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END) as open_threads,
+        SUM(CASE WHEN escalated = 1 THEN 1 ELSE 0 END) as escalated
+      FROM support_threads
+    `).get() as any;
+
+    res.json({
+      success: true,
+      data: {
+        userGrowth,
+        revenue,
+        activeUsers: {
+          dau7: dau7?.count || 0,
+          dau30: dau30?.count || 0,
+        },
+        listings: listingActivity,
+        trust: {
+          avgScore: Math.round(trustMetrics?.avg_score || 0),
+          govVerified: trustMetrics?.gov_verified || 0,
+          socialVerifications: trustMetrics?.social_verifications || 0,
+          scoredUsers: trustMetrics?.scored_users || 0,
+        },
+        notifications: {
+          sentLast7d: notifStats?.total_sent || 0,
+          readLast7d: notifStats?.total_read || 0,
+          readRate: notifStats?.total_sent > 0 ? Math.round((notifStats.total_read / notifStats.total_sent) * 100) : 0,
+        },
+        support: supportMetrics,
+        generatedAt: new Date().toISOString(),
+      },
+    });
+  } catch (err: any) {
+    logger.error('Dashboard data error', { error: err.message });
+    res.status(500).json({ success: false, error: 'Failed to fetch dashboard data' });
+  }
+});
+
+// ─── GET /v1/growth/realtime — Real-time activity feed ───────────────────────
+
+router.get('/realtime', requireAuth, (req: Request, res: Response) => {
+  const { role } = (req as any).user;
+  if (role !== 'admin') {
+    return res.status(403).json({ success: false, error: 'Admin access required' });
+  }
+
+  try {
+    const db = getDb();
+    const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 20));
+
+    const events = db.prepare(`
+      SELECT
+        id, event_type, category, actor_id, actor_type,
+        target_id, target_type, payload, created_at
+      FROM platform_events
+      ORDER BY created_at DESC
+      LIMIT ?
+    `).all(limit) as any[];
+
+    const formatted = events.map((e: any) => ({
+      id: e.id,
+      type: e.event_type,
+      category: e.category,
+      actorId: e.actor_id,
+      actorType: e.actor_type,
+      targetId: e.target_id,
+      payload: e.payload ? JSON.parse(e.payload) : {},
+      timestamp: e.created_at,
+    }));
+
+    res.json({ success: true, data: formatted });
+  } catch (err: any) {
+    logger.error('Realtime feed error', { error: err.message });
+    res.status(500).json({ success: false, error: 'Failed to fetch realtime data' });
+  }
+});
+
+// ─── GET /v1/growth/health — System health metrics for admin dashboard ────────
+
+router.get('/health', requireAuth, (req: Request, res: Response) => {
+  const { role } = (req as any).user;
+  if (role !== 'admin') {
+    return res.status(403).json({ success: false, error: 'Admin access required' });
+  }
+
+  try {
+    let wsClientCount = 0;
+    try {
+      const { getWSClientCount, isWSEnabled } = require('../services/websocket');
+      wsClientCount = isWSEnabled() ? getWSClientCount() : 0;
+    } catch { /* WS not initialized */ }
+
+    let pushCount = 0;
+    try {
+      const { getPushSubscriptionCount } = require('../services/webpush');
+      pushCount = getPushSubscriptionCount();
+    } catch { /* Push not initialized */ }
+
+    let sseClients = 0;
+    try {
+      const { getSSEClientCount } = require('./notifications');
+      sseClients = getSSEClientCount();
+    } catch { /* Notifications not initialized */ }
+
+    const { isR2Enabled, getR2Status } = require('../services/r2Storage');
+
+    res.json({
+      success: true,
+      data: {
+        sseClients,
+        wsClients: wsClientCount,
+        pushSubscriptions: pushCount,
+        r2Status: getR2Status(),
+        uptime: process.uptime(),
+        memory: process.memoryUsage(),
+        nodeVersion: process.version,
+        timestamp: Date.now(),
+      },
+    });
+  } catch (err: any) {
+    logger.error('Health metrics error', { error: err.message });
+    res.status(500).json({ success: false, error: 'Failed to fetch health metrics' });
+  }
+});
+
 export default router;

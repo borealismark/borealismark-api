@@ -996,3 +996,240 @@ export async function sendVerificationResultEmail(
     return false;
   }
 }
+
+/**
+ * Send a transactional notification email for marketplace order events.
+ * v44: Wired to notification preferences — only called when email preference is enabled.
+ */
+export async function sendOrderNotificationEmail(
+  toEmail: string,
+  userName: string,
+  eventType: 'payment_received' | 'order_shipped' | 'order_settled',
+  message: string,
+): Promise<boolean> {
+  const frontendUrl = process.env.FRONTEND_URL ?? 'https://borealisterminal.com';
+  const orderLink = `${frontendUrl}/#orders`;
+
+  const titles: Record<string, string> = {
+    payment_received: 'Payment Received',
+    order_shipped: 'Order Shipped',
+    order_settled: 'Order Settled',
+  };
+
+  const icons: Record<string, string> = {
+    payment_received: '💰',
+    order_shipped: '📦',
+    order_settled: '✅',
+  };
+
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background: #0C0D10; color: #E0E0E0; }
+    .container { max-width: 560px; margin: 40px auto; padding: 0 20px; }
+    .card { background: #16171C; border: 1px solid #2A2B33; border-radius: 12px; padding: 40px 32px; }
+    .logo { color: #D4A853; font-size: 20px; font-weight: 700; letter-spacing: -0.5px; margin-bottom: 24px; }
+    h1 { font-size: 22px; font-weight: 600; color: #FFFFFF; margin: 0 0 16px 0; }
+    p { font-size: 15px; line-height: 1.6; color: #A0A0A0; margin: 0 0 16px 0; }
+    .btn { display: inline-block; background: #D4A853; color: #0C0D10; padding: 12px 32px; border-radius: 8px; text-decoration: none; font-weight: 600; font-size: 15px; margin: 8px 0 24px 0; }
+    .divider { border-top: 1px solid #2A2B33; margin: 24px 0; }
+    .small { font-size: 13px; color: #666; }
+    .footer { text-align: center; padding: 24px 0; font-size: 12px; color: #555; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="card">
+      <div class="logo">Borealis Terminal</div>
+      <h1>${icons[eventType] || '🔔'} ${titles[eventType] || 'Order Update'}</h1>
+      <p>Hi ${userName || 'there'},</p>
+      <p>${message}</p>
+      <a href="${orderLink}" class="btn">View Order Details</a>
+      <div class="divider"></div>
+      <p class="small">You received this email because you have order notifications enabled. You can manage your notification preferences in your dashboard settings.</p>
+    </div>
+    <div class="footer">
+      &copy; ${new Date().getFullYear()} BorealisMark Protocol &mdash; Borealis Terminal
+    </div>
+  </div>
+</body>
+</html>`;
+
+  const text = `${titles[eventType] || 'Order Update'}\n\nHi ${userName || 'there'},\n\n${message}\n\nView your orders: ${orderLink}\n\n— Borealis Terminal`;
+
+  if (!process.env.RESEND_API_KEY) {
+    logger.info('Order notification email (NOT SENT — no RESEND_API_KEY)', { to: toEmail, eventType });
+    return true;
+  }
+
+  try {
+    const result = await getResend().emails.send({
+      from: FROM_ADDRESS,
+      to: [toEmail],
+      subject: `${titles[eventType] || 'Order Update'} — Borealis Terminal`,
+      html,
+      text,
+    });
+
+    if (result.error) {
+      logger.error('Order notification email failed', { error: result.error, to: toEmail });
+      return false;
+    }
+
+    logger.info('Order notification email sent', { to: toEmail, eventType });
+    return true;
+  } catch (err: any) {
+    logger.error('Order notification email error', { error: err.message, to: toEmail });
+    return false;
+  }
+}
+
+/**
+ * Send a payment/subscription notification email.
+ * v44: Wired to notification preferences.
+ */
+export async function sendPaymentNotificationEmail(
+  toEmail: string,
+  userName: string,
+  eventType: 'subscription_created' | 'subscription_expired',
+  details: string,
+): Promise<boolean> {
+  const frontendUrl = process.env.FRONTEND_URL ?? 'https://borealisterminal.com';
+  const link = `${frontendUrl}/#settings`;
+
+  const titles: Record<string, string> = {
+    subscription_created: 'Subscription Activated',
+    subscription_expired: 'Subscription Expired',
+  };
+
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0C0D10; color: #E0E0E0; }
+    .container { max-width: 560px; margin: 40px auto; padding: 0 20px; }
+    .card { background: #16171C; border: 1px solid #2A2B33; border-radius: 12px; padding: 40px 32px; }
+    .logo { color: #D4A853; font-size: 20px; font-weight: 700; margin-bottom: 24px; }
+    h1 { font-size: 22px; font-weight: 600; color: #FFFFFF; margin: 0 0 16px 0; }
+    p { font-size: 15px; line-height: 1.6; color: #A0A0A0; margin: 0 0 16px 0; }
+    .btn { display: inline-block; background: #D4A853; color: #0C0D10; padding: 12px 32px; border-radius: 8px; text-decoration: none; font-weight: 600; }
+    .divider { border-top: 1px solid #2A2B33; margin: 24px 0; }
+    .small { font-size: 13px; color: #666; }
+    .footer { text-align: center; padding: 24px 0; font-size: 12px; color: #555; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="card">
+      <div class="logo">Borealis Terminal</div>
+      <h1>${titles[eventType]}</h1>
+      <p>Hi ${userName},</p>
+      <p>${details}</p>
+      <a href="${link}" class="btn">View Account</a>
+      <div class="divider"></div>
+      <p class="small">Manage notification preferences in your dashboard settings.</p>
+    </div>
+    <div class="footer">&copy; ${new Date().getFullYear()} BorealisMark Protocol</div>
+  </div>
+</body>
+</html>`;
+
+  const text = `${titles[eventType]}\n\nHi ${userName},\n\n${details}\n\nView: ${link}\n\n— Borealis Terminal`;
+
+  if (!process.env.RESEND_API_KEY) {
+    logger.info('Payment notification email (NOT SENT)', { to: toEmail, eventType });
+    return true;
+  }
+
+  try {
+    const result = await getResend().emails.send({
+      from: FROM_ADDRESS,
+      to: [toEmail],
+      subject: `${titles[eventType]} — Borealis Terminal`,
+      html,
+      text,
+    });
+    if (result.error) { logger.error('Payment email failed', { error: result.error }); return false; }
+    logger.info('Payment notification email sent', { to: toEmail, eventType });
+    return true;
+  } catch (err: any) {
+    logger.error('Payment email error', { error: err.message });
+    return false;
+  }
+}
+
+/**
+ * Send a verification notification email.
+ * v44: Wired to notification preferences.
+ */
+export async function sendVerificationNotificationEmail(
+  toEmail: string,
+  userName: string,
+  message: string,
+): Promise<boolean> {
+  const frontendUrl = process.env.FRONTEND_URL ?? 'https://borealisterminal.com';
+  const trustLink = `${frontendUrl}/#trust`;
+
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0C0D10; color: #E0E0E0; }
+    .container { max-width: 560px; margin: 40px auto; padding: 0 20px; }
+    .card { background: #16171C; border: 1px solid #2A2B33; border-radius: 12px; padding: 40px 32px; }
+    .logo { color: #D4A853; font-size: 20px; font-weight: 700; margin-bottom: 24px; }
+    h1 { font-size: 22px; font-weight: 600; color: #FFFFFF; margin: 0 0 16px 0; }
+    p { font-size: 15px; line-height: 1.6; color: #A0A0A0; margin: 0 0 16px 0; }
+    .btn { display: inline-block; background: #D4A853; color: #0C0D10; padding: 12px 32px; border-radius: 8px; text-decoration: none; font-weight: 600; }
+    .divider { border-top: 1px solid #2A2B33; margin: 24px 0; }
+    .small { font-size: 13px; color: #666; }
+    .footer { text-align: center; padding: 24px 0; font-size: 12px; color: #555; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="card">
+      <div class="logo">Borealis Terminal</div>
+      <h1>✅ Verification Complete</h1>
+      <p>Hi ${userName},</p>
+      <p>${message}</p>
+      <a href="${trustLink}" class="btn">View Trust Profile</a>
+      <div class="divider"></div>
+      <p class="small">Manage notification preferences in your dashboard settings.</p>
+    </div>
+    <div class="footer">&copy; ${new Date().getFullYear()} BorealisMark Protocol</div>
+  </div>
+</body>
+</html>`;
+
+  const text = `Verification Complete\n\nHi ${userName},\n\n${message}\n\nView your trust profile: ${trustLink}\n\n— Borealis Terminal`;
+
+  if (!process.env.RESEND_API_KEY) {
+    logger.info('Verification notification email (NOT SENT)', { to: toEmail });
+    return true;
+  }
+
+  try {
+    const result = await getResend().emails.send({
+      from: FROM_ADDRESS,
+      to: [toEmail],
+      subject: 'Verification Complete — Borealis Terminal',
+      html,
+      text,
+    });
+    if (result.error) { logger.error('Verification email failed', { error: result.error }); return false; }
+    logger.info('Verification notification email sent', { to: toEmail });
+    return true;
+  } catch (err: any) {
+    logger.error('Verification email error', { error: err.message });
+    return false;
+  }
+}
