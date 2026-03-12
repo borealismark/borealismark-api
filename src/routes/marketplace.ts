@@ -65,7 +65,7 @@ import {
   formatSanctionStatus,
   type SanctionAction,
 } from '../middleware/messageModeration';
-import { importEbayStore } from '../services/ebayScraper';
+import { importEbayStore, syncSoldListings } from '../services/ebayScraper';
 import { createHash } from 'crypto';
 import { storeInboundEmail } from './adminMail';
 
@@ -2992,6 +2992,93 @@ router.get('/ebay-imports', requireAuth, async (req: Request, res: Response) => 
         createdAt: j.created_at,
         completedAt: j.completed_at
       }))
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * POST /v1/marketplace/ebay-sync-sold — Sync sold/delisted status for imported eBay listings
+ *
+ * Checks each imported listing's eBay page for availability (InStock vs OutOfStock).
+ * Marks sold items as 'sold_externally' and delisted items for removal.
+ *
+ * This endpoint is designed to be called by:
+ *   - Bots/cron jobs on a schedule
+ *   - Admin manually triggering a sync
+ *   - The Migration Officer on server startup
+ *
+ * Auth: requires auth (user syncs their own listings) OR admin (syncs all)
+ * Body: { batchSize?: number }  — default 50, max 200
+ */
+router.post('/ebay-sync-sold', requireAuth, async (req: Request, res: Response) => {
+  try {
+    const authReq = req as AuthRequest;
+    const userId = authReq.user?.sub;
+    const role = authReq.user?.role;
+    if (!userId) return res.status(401).json({ success: false, error: 'Not authenticated' });
+
+    const batchSize = Math.min(Math.max(parseInt(req.body.batchSize) || 50, 1), 200);
+
+    // Admin can sync all users; regular users sync only their own
+    const targetUserId = role === 'admin' ? req.body.userId || undefined : userId;
+
+    res.status(202).json({
+      success: true,
+      message: `Sold sync started — checking up to ${batchSize} listings. This runs in the background.`
+    });
+
+    // Run async so we don't block the response
+    syncSoldListings(targetUserId, batchSize)
+      .then((result) => {
+        logger.info(`[Migration Officer] Sold sync API result: ${JSON.stringify({
+          checked: result.checked,
+          markedSold: result.markedSold,
+          markedDelisted: result.markedDelisted,
+          stillActive: result.stillActive,
+          errors: result.errors
+        })}`);
+      })
+      .catch((err: any) => {
+        logger.error(`[Migration Officer] Sold sync API error: ${err.message}`);
+      });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * GET /v1/marketplace/ebay-sync-sold — Get the latest sync results
+ * Returns the most recent sold sync activity from the agent_tasks log.
+ */
+router.get('/ebay-sync-sold', requireAuth, async (req: Request, res: Response) => {
+  try {
+    const authReq = req as AuthRequest;
+    const userId = authReq.user?.sub;
+    if (!userId) return res.status(401).json({ success: false, error: 'Not authenticated' });
+
+    // Get recent sold sync activities
+    const activities = getDb().prepare(`
+      SELECT listing_id, status_message, metadata, created_at
+      FROM agent_tasks
+      WHERE agent_name = 'Migration Officer'
+        AND task_type = 'migration_sync'
+        AND metadata LIKE '%sold_sync%'
+      ORDER BY created_at DESC
+      LIMIT 50
+    `).all() as any[];
+
+    res.json({
+      success: true,
+      data: {
+        recentSyncs: activities.map((a: any) => ({
+          listingId: a.listing_id,
+          message: a.status_message,
+          metadata: typeof a.metadata === 'string' ? JSON.parse(a.metadata) : a.metadata,
+          syncedAt: a.created_at
+        }))
+      }
     });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });

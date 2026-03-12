@@ -1289,6 +1289,32 @@ function initSchema(db: Database.Database): void {
     logger.info(`[Migration Officer] Removed ${staleImageListings.length} delisted eBay listings with invalid images`);
   }
 
+  // ── Migration Officer: Async sold-listing sync on startup ──────────────────
+  // Check imported eBay listings for sold/delisted status by fetching their eBay pages.
+  // Runs in the background so it doesn't block server startup.
+  // Checks up to 50 listings per deploy (oldest-synced first) to stay within rate limits.
+  const importedActiveCount = db.prepare(`
+    SELECT COUNT(*) as cnt FROM marketplace_listings
+    WHERE origin = 'imported' AND status IN ('published', 'active')
+      AND sync_status = 'active' AND external_url IS NOT NULL AND external_url != ''
+  `).get() as any;
+
+  if (importedActiveCount?.cnt > 0) {
+    logger.info(`[Migration Officer] ${importedActiveCount.cnt} imported listings to check — starting background sold sync (batch of 50)...`);
+    // Dynamic import to avoid circular dependency
+    import('../services/ebayScraper').then(({ syncSoldListings }) => {
+      syncSoldListings(undefined, 50)
+        .then((result) => {
+          logger.info(`[Migration Officer] Startup sold sync complete: ${result.markedSold} sold, ${result.markedDelisted} delisted, ${result.stillActive} active, ${result.errors} errors`);
+        })
+        .catch((err: any) => {
+          logger.error(`[Migration Officer] Startup sold sync failed: ${err.message}`);
+        });
+    }).catch((err: any) => {
+      logger.error(`[Migration Officer] Failed to load ebayScraper for sold sync: ${err.message}`);
+    });
+  }
+
   // Ensure the master API key exists with full admin scopes
   const masterKey = process.env.API_MASTER_KEY;
   if (!masterKey) {

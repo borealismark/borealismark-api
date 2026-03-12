@@ -290,6 +290,207 @@ export async function refreshListingImages(
 }
 
 /**
+ * Check the availability status of a single eBay listing page.
+ * Returns 'in_stock', 'sold', 'delisted', or 'error'.
+ *
+ * Detection method:
+ *   - Active listing → contains schema.org/InStock (HTML ~700KB+)
+ *   - Sold/ended    → contains schema.org/OutOfStock (HTML ~750KB+)
+ *   - Delisted       → redirects to error page, small HTML (~77KB), no availability schema
+ */
+export async function checkListingAvailability(
+  itemUrl: string
+): Promise<'in_stock' | 'sold' | 'delisted' | 'error'> {
+  try {
+    const html = await fetchPage(itemUrl);
+
+    // Delisted/removed listings get a tiny error page
+    if (html.length < 150000) {
+      const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+      if (titleMatch && titleMatch[1].toLowerCase().includes('error')) {
+        return 'delisted';
+      }
+    }
+
+    // Check schema.org availability markers
+    const hasInStock = /schema\.org\/InStock/i.test(html);
+    const hasOutOfStock = /schema\.org\/(OutOfStock|SoldOut|Discontinued)/i.test(html);
+
+    // Also check for explicit "This listing has ended" text
+    const hasEndedText = html.includes('This listing has ended') ||
+                         html.includes('Bidding has ended') ||
+                         html.includes('This listing was ended');
+
+    if (hasOutOfStock || hasEndedText) return 'sold';
+    if (hasInStock) return 'in_stock';
+
+    // No clear signal — treat as delisted if the page is very small
+    if (html.length < 200000) return 'delisted';
+
+    // Large page but no availability markers — assume still active (eBay A/B testing)
+    return 'in_stock';
+  } catch (err: any) {
+    logger.error(`[eBay Scraper] Availability check failed for ${itemUrl}: ${err.message}`);
+    return 'error';
+  }
+}
+
+/**
+ * Sync sold/delisted status for all imported eBay listings belonging to a user (or all users).
+ * Fetches each listing's eBay page and checks availability via schema.org markers.
+ *
+ * This is the core Migration Officer sync — designed to be called:
+ *   1. Via API endpoint (POST /v1/marketplace/ebay-sync-sold) by bots or admins
+ *   2. As a startup migration in database.ts
+ *   3. On a scheduled interval by any external service
+ *
+ * @param userId - optional: sync only this user's listings; omit for all users
+ * @param batchSize - how many listings to check per run (default 50, to stay polite)
+ * @returns summary of what was synced
+ */
+export async function syncSoldListings(
+  userId?: string,
+  batchSize: number = 50
+): Promise<{
+  checked: number;
+  markedSold: number;
+  markedDelisted: number;
+  stillActive: number;
+  errors: number;
+  details: Array<{ id: string; title: string; externalUrl: string; result: string }>;
+}> {
+  const db = getDb();
+  const now = Date.now();
+
+  // Find imported listings that are still marked as published/active
+  let listings: any[];
+  if (userId) {
+    listings = db.prepare(`
+      SELECT id, user_id, title, external_url, sync_status
+      FROM marketplace_listings
+      WHERE origin = 'imported'
+        AND status IN ('published', 'active')
+        AND sync_status = 'active'
+        AND external_url IS NOT NULL
+        AND external_url != ''
+        AND user_id = ?
+      ORDER BY last_synced_at ASC NULLS FIRST
+      LIMIT ?
+    `).all(userId, batchSize) as any[];
+  } else {
+    listings = db.prepare(`
+      SELECT id, user_id, title, external_url, sync_status
+      FROM marketplace_listings
+      WHERE origin = 'imported'
+        AND status IN ('published', 'active')
+        AND sync_status = 'active'
+        AND external_url IS NOT NULL
+        AND external_url != ''
+      ORDER BY last_synced_at ASC NULLS FIRST
+      LIMIT ?
+    `).all(batchSize) as any[];
+  }
+
+  logger.info(`[Migration Officer] Sold sync started — checking ${listings.length} imported listings`);
+
+  let markedSold = 0;
+  let markedDelisted = 0;
+  let stillActive = 0;
+  let errors = 0;
+  const details: Array<{ id: string; title: string; externalUrl: string; result: string }> = [];
+
+  for (const listing of listings) {
+    try {
+      await sleep(DELAY_MS); // polite delay
+
+      const availability = await checkListingAvailability(listing.external_url);
+
+      // Always update last_synced_at so we rotate through listings evenly
+      db.prepare(
+        'UPDATE marketplace_listings SET last_synced_at = ? WHERE id = ?'
+      ).run(now, listing.id);
+
+      if (availability === 'sold') {
+        // Mark as sold externally — still visible on storefront with SOLD badge
+        db.prepare(`
+          UPDATE marketplace_listings
+          SET status = 'sold', sync_status = 'sold_externally', updated_at = ?
+          WHERE id = ?
+        `).run(now, listing.id);
+
+        logListingActivity({
+          listingId: listing.id,
+          userId: listing.user_id,
+          agentName: 'Migration Officer',
+          taskType: 'migration_sync',
+          platform: 'ebay',
+          status: 'completed',
+          statusMessage: `Listing sold externally on eBay — marked as sold`,
+          metadata: {
+            action: 'sold_sync',
+            source: listing.external_url,
+            detectedStatus: 'sold_externally'
+          }
+        });
+
+        markedSold++;
+        details.push({ id: listing.id, title: listing.title, externalUrl: listing.external_url, result: 'sold_externally' });
+        logger.info(`[Migration Officer] SOLD: ${listing.title.substring(0, 50)} (${listing.external_url})`);
+
+      } else if (availability === 'delisted') {
+        // eBay listing is gone entirely — remove from store
+        db.prepare(`
+          UPDATE marketplace_listings
+          SET status = 'delisted', sync_status = 'delisted', updated_at = ?
+          WHERE id = ?
+        `).run(now, listing.id);
+
+        logListingActivity({
+          listingId: listing.id,
+          userId: listing.user_id,
+          agentName: 'Migration Officer',
+          taskType: 'migration_sync',
+          platform: 'ebay',
+          status: 'completed',
+          statusMessage: `eBay listing removed/delisted — hidden from storefront`,
+          metadata: {
+            action: 'sold_sync',
+            source: listing.external_url,
+            detectedStatus: 'delisted'
+          }
+        });
+
+        markedDelisted++;
+        details.push({ id: listing.id, title: listing.title, externalUrl: listing.external_url, result: 'delisted' });
+        logger.info(`[Migration Officer] DELISTED: ${listing.title.substring(0, 50)} (${listing.external_url})`);
+
+      } else if (availability === 'in_stock') {
+        stillActive++;
+        details.push({ id: listing.id, title: listing.title, externalUrl: listing.external_url, result: 'active' });
+
+      } else {
+        errors++;
+        details.push({ id: listing.id, title: listing.title, externalUrl: listing.external_url, result: 'check_error' });
+      }
+    } catch (err: any) {
+      errors++;
+      details.push({ id: listing.id, title: listing.title, externalUrl: listing.external_url, result: 'error: ' + err.message?.substring(0, 60) });
+    }
+  }
+
+  logger.info(`[Migration Officer] Sold sync complete: ${markedSold} sold, ${markedDelisted} delisted, ${stillActive} active, ${errors} errors (of ${listings.length} checked)`);
+
+  return {
+    checked: listings.length,
+    markedSold,
+    markedDelisted,
+    stillActive,
+    errors,
+    details
+  };
+}
+
+/**
  * Full import flow: scrape store, create storefront, import all listings.
  */
 export async function importEbayStore(
