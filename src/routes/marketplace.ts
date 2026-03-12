@@ -2456,6 +2456,38 @@ router.get('/storefronts/:slug', async (req: Request, res: Response) => {
       return res.status(404).json({ success: false, error: 'Storefront not found' });
     }
 
+    const userId = (storefront as any).user_id;
+
+    // Get trust data
+    const trustData = computeAndStoreTrustScore(userId);
+
+    // Get verified verification records
+    const verifications = getDb().prepare(`
+      SELECT verification_type, platform, status, verified_at
+      FROM user_verifications
+      WHERE user_id = ? AND status = 'verified'
+      ORDER BY verified_at DESC
+    `).all(userId) as any[];
+
+    // Get user basic info
+    const sellerUser = getDb().prepare('SELECT name, tier, created_at, email_verified, last_login_at FROM users WHERE id = ?').get(userId) as any;
+
+    // Get distinct categories for this seller's listings
+    const categories = getDb().prepare(`
+      SELECT DISTINCT category, COUNT(*) as count
+      FROM marketplace_listings
+      WHERE user_id = ? AND status = 'published' AND category IS NOT NULL
+      GROUP BY category ORDER BY count DESC
+    `).all(userId) as any[];
+
+    // Get distinct conditions
+    const conditions = getDb().prepare(`
+      SELECT DISTINCT condition, COUNT(*) as count
+      FROM marketplace_listings
+      WHERE user_id = ? AND status = 'published' AND condition IS NOT NULL
+      GROUP BY condition ORDER BY count DESC
+    `).all(userId) as any[];
+
     const page = Math.max(1, Number(req.query.page) || 1);
     const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 20));
     const category = req.query.category as string;
@@ -2519,6 +2551,29 @@ router.get('/storefronts/:slug', async (req: Request, res: Response) => {
           logoUrl: (storefront as any).logo_url,
           bannerUrl: (storefront as any).banner_url,
           createdAt: (storefront as any).created_at,
+          seller: {
+            name: sellerUser?.name || (storefront as any).store_name,
+            tier: sellerUser?.tier || 'standard',
+            memberSince: sellerUser?.created_at,
+            emailVerified: sellerUser?.email_verified === 1,
+            lastActive: sellerUser?.last_login_at,
+          },
+          trust: {
+            totalScore: trustData.totalScore,
+            trustLevel: trustData.trustLevel,
+            emailVerified: trustData.emailVerified,
+            socialVerified: trustData.socialVerified,
+            documentVerified: trustData.documentVerified,
+            transactionCount: trustData.transactionCount,
+            accountAgeDays: trustData.accountAgeDays,
+          },
+          verifications: verifications.map((v: any) => ({
+            type: v.verification_type,
+            platform: v.platform,
+            verifiedAt: v.verified_at,
+          })),
+          categories: categories.map((c: any) => ({ name: c.category, count: c.count })),
+          conditions: conditions.map((c: any) => ({ name: c.condition, count: c.count })),
         },
         listings: listings.map(l => ({
           id: l.id,
