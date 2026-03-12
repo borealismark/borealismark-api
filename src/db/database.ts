@@ -1549,6 +1549,434 @@ function initSchema(db: Database.Database): void {
       logger.info(`Seeded ${badges.length} badge definitions for Academy progression`);
     }
   }
+
+  // ── The Spark — Trust Token Economy & Learning Engine ──────────────────────
+  // CORE DESIGN: 1 Trust Token (TT) = 1 XP earned through Spark lessons.
+  // spendable_xp on user_progression tracks the wallet balance.
+  // Every TT traces back to a real learning moment — no pay-to-win, no inflation.
+
+  // Migrate: add spendable_xp to user_progression (Trust Token wallet)
+  const progCols = (db.prepare("PRAGMA table_info(user_progression)").all() as Array<{ name: string }>).map(r => r.name);
+  if (!progCols.includes('spendable_xp')) {
+    db.exec("ALTER TABLE user_progression ADD COLUMN spendable_xp INTEGER NOT NULL DEFAULT 0");
+    // Backfill: give existing users their full XP as spendable (one-time grant)
+    db.exec("UPDATE user_progression SET spendable_xp = xp_total");
+    logger.info('Migrated user_progression: added spendable_xp (Trust Token wallet)');
+  }
+  if (!progCols.includes('selected_guide')) {
+    db.exec("ALTER TABLE user_progression ADD COLUMN selected_guide TEXT DEFAULT NULL");
+    logger.info('Migrated user_progression: added selected_guide column');
+  }
+
+  // Trust Guides — Nova (gold, AI Safety), Ember (violet, Creating with AI), Luma (emerald, Privacy)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS spark_guides (
+      id TEXT PRIMARY KEY,
+      slug TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      domain TEXT NOT NULL,
+      color TEXT NOT NULL,
+      icon_svg TEXT NOT NULL DEFAULT '',
+      tagline TEXT NOT NULL DEFAULT '',
+      description TEXT NOT NULL DEFAULT '',
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      active INTEGER NOT NULL DEFAULT 1,
+      created_at INTEGER NOT NULL
+    );
+  `);
+
+  // Spark Lessons — Curiosity Hook structure: Hook → Adventure → Reflection
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS spark_lessons (
+      id TEXT PRIMARY KEY,
+      guide_id TEXT NOT NULL,
+      title TEXT NOT NULL,
+      slug TEXT NOT NULL UNIQUE,
+      description TEXT NOT NULL DEFAULT '',
+      difficulty TEXT NOT NULL DEFAULT 'beginner',
+      xp_reward INTEGER NOT NULL DEFAULT 50,
+      hook_question TEXT NOT NULL DEFAULT '',
+      hook_scenario TEXT NOT NULL DEFAULT '',
+      adventure_content TEXT NOT NULL DEFAULT '',
+      adventure_interactive TEXT NOT NULL DEFAULT '',
+      reflection_prompt TEXT NOT NULL DEFAULT '',
+      reflection_choices TEXT NOT NULL DEFAULT '[]',
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      age_min INTEGER NOT NULL DEFAULT 5,
+      age_max INTEGER NOT NULL DEFAULT 12,
+      active INTEGER NOT NULL DEFAULT 1,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (guide_id) REFERENCES spark_guides(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_spark_lessons_guide ON spark_lessons(guide_id, sort_order);
+  `);
+
+  // Spark Lesson Progress — tracks each child's journey through lessons
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS spark_progress (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      lesson_id TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'started',
+      hook_completed INTEGER NOT NULL DEFAULT 0,
+      adventure_completed INTEGER NOT NULL DEFAULT 0,
+      reflection_completed INTEGER NOT NULL DEFAULT 0,
+      reflection_answer TEXT,
+      xp_awarded INTEGER NOT NULL DEFAULT 0,
+      time_spent_seconds INTEGER NOT NULL DEFAULT 0,
+      started_at INTEGER NOT NULL,
+      completed_at INTEGER,
+      FOREIGN KEY (user_id) REFERENCES users(id),
+      FOREIGN KEY (lesson_id) REFERENCES spark_lessons(id),
+      UNIQUE(user_id, lesson_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_spark_progress_user ON spark_progress(user_id, status);
+  `);
+
+  // Spark Shop — items purchasable with Trust Tokens (spendable_xp)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS spark_shop_items (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      category TEXT NOT NULL DEFAULT 'avatar',
+      item_type TEXT NOT NULL DEFAULT 'cosmetic',
+      price_tt INTEGER NOT NULL,
+      icon_svg TEXT NOT NULL DEFAULT '',
+      rarity TEXT NOT NULL DEFAULT 'common',
+      guide_requirement TEXT,
+      level_requirement INTEGER NOT NULL DEFAULT 0,
+      limited_stock INTEGER,
+      sold_count INTEGER NOT NULL DEFAULT 0,
+      active INTEGER NOT NULL DEFAULT 1,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_spark_shop_category ON spark_shop_items(category, active);
+  `);
+
+  // Spark Purchases — immutable purchase log
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS spark_purchases (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      item_id TEXT NOT NULL,
+      price_tt INTEGER NOT NULL,
+      balance_after INTEGER NOT NULL,
+      purchased_at INTEGER NOT NULL,
+      FOREIGN KEY (user_id) REFERENCES users(id),
+      FOREIGN KEY (item_id) REFERENCES spark_shop_items(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_spark_purchases_user ON spark_purchases(user_id, purchased_at DESC);
+  `);
+
+  // Spark Avatar — each user's equipped cosmetics
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS spark_avatar (
+      user_id TEXT PRIMARY KEY,
+      avatar_base TEXT NOT NULL DEFAULT 'default',
+      hat_item_id TEXT,
+      outfit_item_id TEXT,
+      accessory_item_id TEXT,
+      background_item_id TEXT,
+      title_item_id TEXT,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    );
+  `);
+
+  // Spark Parent Links — connect child accounts to parent BorealisMark accounts
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS spark_parent_links (
+      id TEXT PRIMARY KEY,
+      parent_user_id TEXT NOT NULL,
+      child_user_id TEXT NOT NULL,
+      permissions TEXT NOT NULL DEFAULT '{"view_progress":true,"time_controls":true,"content_filter":true}',
+      daily_time_limit_minutes INTEGER DEFAULT 60,
+      active INTEGER NOT NULL DEFAULT 1,
+      linked_at INTEGER NOT NULL,
+      FOREIGN KEY (parent_user_id) REFERENCES users(id),
+      FOREIGN KEY (child_user_id) REFERENCES users(id),
+      UNIQUE(parent_user_id, child_user_id)
+    );
+  `);
+
+  // Seed the three Trust Guides if they don't exist
+  {
+    const guideCount = (db.prepare("SELECT COUNT(*) as cnt FROM spark_guides").get() as { cnt: number }).cnt;
+    if (guideCount === 0) {
+      const now = Date.now();
+      const guideStmt = db.prepare(
+        'INSERT INTO spark_guides (id, slug, name, domain, color, tagline, description, sort_order, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+      );
+
+      guideStmt.run(
+        'guide-nova', 'nova', 'Nova', 'AI Safety & Verification', '#d4a853',
+        'The Verifier — Can we trust what AI tells us?',
+        'Nova teaches you how to verify AI outputs, spot misinformation, and understand when AI gets things right — and when it doesn\'t. Every lesson builds your ability to think critically about artificial intelligence.',
+        1, now
+      );
+
+      guideStmt.run(
+        'guide-ember', 'ember', 'Ember', 'Creating with AI', '#A594E0',
+        'The Builder — What can we create with AI?',
+        'Ember shows you how to create responsibly with AI tools — from art and stories to code and music. Learn the ethics of AI-generated content and become a confident, responsible creator.',
+        2, now
+      );
+
+      guideStmt.run(
+        'guide-luma', 'luma', 'Luma', 'Privacy & Data Protection', '#34d399',
+        'The Protector — How do we keep our data safe?',
+        'Luma guards your digital identity. Learn about privacy, data protection, and why your personal information matters. Every lesson makes you stronger at protecting yourself online.',
+        3, now
+      );
+
+      logger.info('Seeded 3 Trust Guides: Nova, Ember, Luma');
+    }
+  }
+
+  // Seed starter lessons for each guide
+  {
+    const lessonCount = (db.prepare("SELECT COUNT(*) as cnt FROM spark_lessons").get() as { cnt: number }).cnt;
+    if (lessonCount === 0) {
+      const now = Date.now();
+      const lessonStmt = db.prepare(
+        'INSERT INTO spark_lessons (id, guide_id, title, slug, description, difficulty, xp_reward, hook_question, hook_scenario, adventure_content, adventure_interactive, reflection_prompt, reflection_choices, sort_order, age_min, age_max, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+      );
+
+      // ── Nova Lessons (AI Safety & Verification) ──
+      lessonStmt.run(
+        'lesson-nova-01', 'guide-nova',
+        'Can AI Make Mistakes?', 'can-ai-make-mistakes',
+        'Discover that even the smartest AI can get things wrong — and learn how to spot it.',
+        'beginner', 50,
+        'If a robot told you the sky is green, would you believe it?',
+        'Your friend shows you a homework answer that an AI chatbot gave them. It looks right... but something feels off. Can you figure out what the AI got wrong?',
+        JSON.stringify({
+          sections: [
+            { type: 'text', content: 'AI is trained on lots of information — but it doesn\'t actually understand things the way you do. Sometimes it mixes up facts or makes things up entirely. This is called a "hallucination."' },
+            { type: 'example', content: 'An AI was asked: "When was the Eiffel Tower built?" It answered: "1887." The real answer is 1889. Close — but wrong!' },
+            { type: 'text', content: 'That\'s why we always verify. Verification means checking if something is true by looking at more than one source.' }
+          ]
+        }),
+        JSON.stringify({
+          type: 'spot-the-error',
+          prompt: 'The AI says: "The Great Wall of China is 500 miles long." Is this correct?',
+          options: [
+            { text: 'Yes, that sounds right!', correct: false, feedback: 'Not quite! The Great Wall is actually about 13,000 miles long. The AI was way off!' },
+            { text: 'No — I should check another source', correct: true, feedback: 'Exactly! The Great Wall is about 13,000 miles. Always verify big claims!' },
+            { text: 'I\'m not sure, but I\'ll trust the AI', correct: false, feedback: 'When you\'re not sure, that\'s the BEST time to check! Never trust blindly.' }
+          ]
+        }),
+        'Now that you know AI can make mistakes, what\'s the most important thing to do when AI gives you an answer?',
+        JSON.stringify([
+          { text: 'Always check with another source', value: 'verify', correct: true },
+          { text: 'Trust it because it\'s a computer', value: 'trust', correct: false },
+          { text: 'Ignore it completely', value: 'ignore', correct: false },
+          { text: 'Ask a friend if it sounds right', value: 'ask', correct: true }
+        ]),
+        1, 6, 12, now, now
+      );
+
+      lessonStmt.run(
+        'lesson-nova-02', 'guide-nova',
+        'What is a Deepfake?', 'what-is-a-deepfake',
+        'Learn how AI can create fake videos and images — and how to protect yourself from being fooled.',
+        'intermediate', 75,
+        'What if you saw a video of your favourite celebrity saying something wild — but it never actually happened?',
+        'A video is going viral online showing a famous scientist saying homework should be banned forever. Millions of people are sharing it. But Nova has a hunch something isn\'t right...',
+        JSON.stringify({
+          sections: [
+            { type: 'text', content: 'A deepfake is a video, image, or audio clip created by AI to look and sound like a real person — but it\'s completely made up.' },
+            { type: 'text', content: 'Deepfakes work by studying thousands of photos and videos of someone, then learning to copy their face, voice, and movements.' },
+            { type: 'tip', content: 'Look for clues: blurry edges around the face, weird blinking, lips that don\'t quite match the words, or lighting that doesn\'t match the background.' }
+          ]
+        }),
+        JSON.stringify({
+          type: 'detective',
+          prompt: 'Which of these clues might tell you a video is a deepfake?',
+          options: [
+            { text: 'The person\'s eyes never blink', correct: true, feedback: 'Good catch! Early deepfakes often forgot to include natural blinking.' },
+            { text: 'The video is in high definition', correct: false, feedback: 'HD alone doesn\'t mean it\'s fake — deepfakes can be high quality too.' },
+            { text: 'The lips don\'t match the words perfectly', correct: true, feedback: 'Yes! Audio-visual mismatch is one of the biggest deepfake tells.' },
+            { text: 'The background has strange warping', correct: true, feedback: 'Exactly! AI sometimes struggles with consistent backgrounds.' }
+          ],
+          multiSelect: true
+        }),
+        'If someone sends you a shocking video of a public figure, what should you do first?',
+        JSON.stringify([
+          { text: 'Share it immediately — everyone needs to see this', value: 'share', correct: false },
+          { text: 'Check if trusted news sources are reporting it', value: 'verify', correct: true },
+          { text: 'Look for deepfake clues like lip-sync issues', value: 'inspect', correct: true },
+          { text: 'Assume it\'s real because video doesn\'t lie', value: 'trust', correct: false }
+        ]),
+        2, 8, 12, now, now
+      );
+
+      // ── Ember Lessons (Creating with AI) ──
+      lessonStmt.run(
+        'lesson-ember-01', 'guide-ember',
+        'Your First AI Creation', 'your-first-ai-creation',
+        'Use AI as a creative partner — and learn why the human behind the keyboard always matters most.',
+        'beginner', 50,
+        'If AI can write stories and draw pictures, does that make it an artist?',
+        'Ember hands you a magical sketchpad. You can ask AI to help you draw anything. But here\'s the twist — the AI needs YOUR ideas to make something amazing. Without you, it\'s just a blank page.',
+        JSON.stringify({
+          sections: [
+            { type: 'text', content: 'AI tools can help you create incredible things — stories, art, music, even code. But AI doesn\'t have imagination. It learned from millions of human creations.' },
+            { type: 'text', content: 'Think of AI as a super-powered assistant. YOU bring the ideas, the feelings, and the creativity. AI helps you build them faster.' },
+            { type: 'example', content: 'When you tell AI to "draw a cat," it creates a generic cat. But when you say "draw a fluffy orange cat wearing a tiny astronaut helmet, floating in space with stars reflecting in its visor" — that\'s YOUR vision coming to life.' }
+          ]
+        }),
+        JSON.stringify({
+          type: 'creative-prompt',
+          prompt: 'Which of these prompts would give the BEST result from an AI art tool?',
+          options: [
+            { text: 'Draw a dog', correct: false, feedback: 'This is too vague! The AI won\'t know what kind of dog, what style, or what mood you want.' },
+            { text: 'A golden retriever puppy playing in autumn leaves, watercolor style, warm sunset lighting', correct: true, feedback: 'Perfect! Specific details = better results. You\'re the creative director!' },
+            { text: 'Make something cool', correct: false, feedback: 'Cool means different things to everyone! AI needs specifics to match your vision.' }
+          ]
+        }),
+        'When you use AI to help create something, who deserves the credit?',
+        JSON.stringify([
+          { text: 'The AI — it did all the work', value: 'ai', correct: false },
+          { text: 'The human — because the ideas and direction came from them', value: 'human', correct: true },
+          { text: 'It\'s a collaboration — both matter', value: 'both', correct: true },
+          { text: 'Nobody — it just appeared', value: 'nobody', correct: false }
+        ]),
+        1, 6, 12, now, now
+      );
+
+      lessonStmt.run(
+        'lesson-ember-02', 'guide-ember',
+        'The Ethics of AI Art', 'ethics-of-ai-art',
+        'When AI creates art, whose work is it based on? Learn about fairness in AI creativity.',
+        'intermediate', 75,
+        'If an AI learned to paint by studying a million paintings, does it owe those artists anything?',
+        'A young artist discovers that an AI image generator can copy their unique style perfectly. They spent years developing that style. Now anyone can replicate it in seconds. Is that fair?',
+        JSON.stringify({
+          sections: [
+            { type: 'text', content: 'AI art generators are trained on millions of images made by real human artists. The AI learns patterns, styles, and techniques from these works.' },
+            { type: 'text', content: 'This creates a big question: if AI learned from human art, should those artists be credited or compensated? Different people have different opinions.' },
+            { type: 'tip', content: 'Being an ethical AI creator means thinking about where the AI\'s abilities came from and being honest about using AI tools.' }
+          ]
+        }),
+        JSON.stringify({
+          type: 'debate',
+          prompt: 'An AI can perfectly copy a famous artist\'s style. A company uses this to sell AI-generated art in that style. What\'s the most ethical approach?',
+          options: [
+            { text: 'It\'s fine — styles can\'t be owned', value: 'ok', feedback: 'Some people agree, but many artists feel their unique style represents years of hard work.' },
+            { text: 'The original artist should be credited', value: 'credit', feedback: 'Crediting sources is a strong ethical position. Transparency builds trust.' },
+            { text: 'The original artist should be paid', value: 'pay', feedback: 'Many artists advocate for compensation. This is an active area of debate and lawmaking.' },
+            { text: 'AI shouldn\'t be allowed to copy specific styles', value: 'ban', feedback: 'Some platforms are adding opt-out features so artists can protect their work from AI training.' }
+          ]
+        }),
+        'When you use AI to create something, what\'s the most responsible thing to do?',
+        JSON.stringify([
+          { text: 'Be transparent that AI helped create it', value: 'transparent', correct: true },
+          { text: 'Pretend I made it all by hand', value: 'lie', correct: false },
+          { text: 'Think about whose work the AI learned from', value: 'think', correct: true },
+          { text: 'It doesn\'t matter as long as it looks good', value: 'ignore', correct: false }
+        ]),
+        2, 8, 12, now, now
+      );
+
+      // ── Luma Lessons (Privacy & Data Protection) ──
+      lessonStmt.run(
+        'lesson-luma-01', 'guide-luma',
+        'Your Digital Footprint', 'your-digital-footprint',
+        'Every click, like, and search leaves a trace. Learn what your digital footprint reveals about you.',
+        'beginner', 50,
+        'Did you know that every time you go online, you leave invisible footprints behind?',
+        'Luma shows you a map of all the places you\'ve been online today. Every website, every search, every click — it\'s all there. Some of those footprints can be seen by people you\'ve never even met.',
+        JSON.stringify({
+          sections: [
+            { type: 'text', content: 'Your digital footprint is the trail of data you leave behind when you use the internet. It includes everything: websites visited, things you\'ve searched for, photos you\'ve posted, and messages you\'ve sent.' },
+            { type: 'text', content: 'There are two types: your active footprint (things you choose to share) and your passive footprint (data collected about you without you knowing).' },
+            { type: 'example', content: 'Active: posting a photo on social media. Passive: a website tracking which pages you visit and how long you stay on each one.' }
+          ]
+        }),
+        JSON.stringify({
+          type: 'classify',
+          prompt: 'Sort these into Active Footprint or Passive Footprint:',
+          items: [
+            { text: 'Posting a comment on a video', answer: 'active', feedback: 'Correct! You chose to post that — it\'s active.' },
+            { text: 'A website using cookies to track you', answer: 'passive', feedback: 'Right! You didn\'t ask for tracking — that\'s passive.' },
+            { text: 'Signing up for a new app', answer: 'active', feedback: 'Yes! You decided to share your info — active footprint.' },
+            { text: 'Your phone recording your location', answer: 'passive', feedback: 'Exactly! Most people don\'t realize their location is being logged.' }
+          ]
+        }),
+        'Now that you know about digital footprints, what\'s the smartest habit to build?',
+        JSON.stringify([
+          { text: 'Think before you post — it might be there forever', value: 'think', correct: true },
+          { text: 'Never use the internet', value: 'avoid', correct: false },
+          { text: 'Check your privacy settings regularly', value: 'settings', correct: true },
+          { text: 'It doesn\'t matter — nobody looks at my data', value: 'ignore', correct: false }
+        ]),
+        1, 6, 12, now, now
+      );
+
+      lessonStmt.run(
+        'lesson-luma-02', 'guide-luma',
+        'Passwords: Your First Line of Defense', 'passwords-first-line-of-defense',
+        'Learn why strong passwords matter and how to create ones that even AI can\'t crack.',
+        'beginner', 50,
+        'How long would it take a computer to guess your password?',
+        'Luma runs a simulation: a basic password like "password123" takes a computer less than one second to crack. But a strong password? That could take millions of years. The difference is huge — and you\'re about to learn why.',
+        JSON.stringify({
+          sections: [
+            { type: 'text', content: 'A password is like a lock on your digital life. A weak lock can be picked in seconds. A strong lock keeps everything safe.' },
+            { type: 'text', content: 'Strong passwords are: long (12+ characters), use a mix of letters, numbers, and symbols, and avoid common words or patterns.' },
+            { type: 'tip', content: 'Use a passphrase! String together random words: "purple-elephant-dances-tuesday" is much stronger than "P@ssw0rd!" and easier to remember.' }
+          ]
+        }),
+        JSON.stringify({
+          type: 'rank',
+          prompt: 'Rank these passwords from weakest to strongest:',
+          items: [
+            { text: 'password123', rank: 1, feedback: 'This is literally the first thing hackers try. Never use this!' },
+            { text: 'Fluffy2019!', rank: 2, feedback: 'Better, but pet names and years are too easy to guess from social media.' },
+            { text: 'Kj$8mP2x!qZ', rank: 3, feedback: 'Strong but hard to remember. Good for a password manager!' },
+            { text: 'correct-horse-battery-staple', rank: 4, feedback: 'Long passphrases are both strong AND memorable. This is the way!' }
+          ]
+        }),
+        'What\'s the best strategy for managing all your passwords?',
+        JSON.stringify([
+          { text: 'Use the same password everywhere so I don\'t forget', value: 'reuse', correct: false },
+          { text: 'Use a password manager to store unique passwords', value: 'manager', correct: true },
+          { text: 'Write them on a sticky note on my monitor', value: 'sticky', correct: false },
+          { text: 'Use unique passphrases for important accounts', value: 'passphrase', correct: true }
+        ]),
+        2, 6, 12, now, now
+      );
+
+      logger.info('Seeded 6 starter Spark lessons (2 per guide)');
+    }
+  }
+
+  // Seed starter shop items
+  {
+    const shopCount = (db.prepare("SELECT COUNT(*) as cnt FROM spark_shop_items").get() as { cnt: number }).cnt;
+    if (shopCount === 0) {
+      const now = Date.now();
+      const shopStmt = db.prepare(
+        'INSERT INTO spark_shop_items (id, name, description, category, item_type, price_tt, rarity, guide_requirement, level_requirement, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+      );
+
+      shopStmt.run('shop-hat-explorer', 'Explorer\'s Cap', 'A curious adventurer\'s hat. Shows you\'re ready to learn.', 'avatar', 'hat', 100, 'common', null, 0, now);
+      shopStmt.run('shop-hat-nova', 'Nova\'s Verification Visor', 'A golden visor that glows when you spot misinformation.', 'avatar', 'hat', 250, 'uncommon', 'guide-nova', 2, now);
+      shopStmt.run('shop-hat-ember', 'Ember\'s Creation Crown', 'A violet crown that sparkles with creative energy.', 'avatar', 'hat', 250, 'uncommon', 'guide-ember', 2, now);
+      shopStmt.run('shop-hat-luma', 'Luma\'s Shield Helm', 'An emerald helm that protects your digital identity.', 'avatar', 'hat', 250, 'uncommon', 'guide-luma', 2, now);
+      shopStmt.run('shop-bg-aurora', 'Aurora Background', 'A shimmering northern lights backdrop for your profile.', 'avatar', 'background', 200, 'common', null, 1, now);
+      shopStmt.run('shop-bg-cosmos', 'Cosmic Background', 'Deep space with swirling galaxies.', 'avatar', 'background', 350, 'rare', null, 3, now);
+      shopStmt.run('shop-title-curious', 'Title: Curious Mind', 'Display "Curious Mind" on your profile.', 'avatar', 'title', 150, 'common', null, 0, now);
+      shopStmt.run('shop-title-verifier', 'Title: Truth Seeker', 'Display "Truth Seeker" on your profile. Requires Nova path.', 'avatar', 'title', 300, 'uncommon', 'guide-nova', 3, now);
+      shopStmt.run('shop-title-creator', 'Title: Digital Artist', 'Display "Digital Artist" on your profile. Requires Ember path.', 'avatar', 'title', 300, 'uncommon', 'guide-ember', 3, now);
+      shopStmt.run('shop-title-protector', 'Title: Data Guardian', 'Display "Data Guardian" on your profile. Requires Luma path.', 'avatar', 'title', 300, 'uncommon', 'guide-luma', 3, now);
+
+      logger.info('Seeded 10 starter Spark shop items');
+    }
+  }
 }
 
 // ─── User Queries ─────────────────────────────────────────────────────────────
@@ -4793,4 +5221,313 @@ export function getLeaderboard(limit = 25): any[] {
     ORDER BY up.xp_total DESC
     LIMIT ?
   `).all(limit) as any[];
+}
+
+// ─── The Spark — Trust Token Economy & Learning Engine ─────────────────────────
+
+/** Get all active Trust Guides */
+export function getSparkGuides(): any[] {
+  return getDb().prepare(
+    'SELECT id, slug, name, domain, color, icon_svg, tagline, description, sort_order FROM spark_guides WHERE active = 1 ORDER BY sort_order ASC'
+  ).all() as any[];
+}
+
+/** Get a single guide by slug */
+export function getSparkGuideBySlug(slug: string): any | undefined {
+  return getDb().prepare(
+    'SELECT id, slug, name, domain, color, icon_svg, tagline, description FROM spark_guides WHERE slug = ? AND active = 1'
+  ).get(slug);
+}
+
+/** Set user's selected guide */
+export function selectSparkGuide(userId: string, guideSlug: string): void {
+  getDb().prepare('UPDATE user_progression SET selected_guide = ?, updated_at = ? WHERE user_id = ?')
+    .run(guideSlug, Date.now(), userId);
+}
+
+/** Get user's selected guide */
+export function getSelectedGuide(userId: string): string | null {
+  const row = getDb().prepare('SELECT selected_guide FROM user_progression WHERE user_id = ?').get(userId) as { selected_guide: string | null } | undefined;
+  return row?.selected_guide ?? null;
+}
+
+/** Get lessons for a guide (optionally filtered by difficulty) */
+export function getSparkLessons(guideId: string, difficulty?: string): any[] {
+  if (difficulty) {
+    return getDb().prepare(
+      'SELECT id, guide_id, title, slug, description, difficulty, xp_reward, sort_order, age_min, age_max FROM spark_lessons WHERE guide_id = ? AND difficulty = ? AND active = 1 ORDER BY sort_order ASC'
+    ).all(guideId, difficulty) as any[];
+  }
+  return getDb().prepare(
+    'SELECT id, guide_id, title, slug, description, difficulty, xp_reward, sort_order, age_min, age_max FROM spark_lessons WHERE guide_id = ? AND active = 1 ORDER BY sort_order ASC'
+  ).all(guideId) as any[];
+}
+
+/** Get full lesson details by slug (includes all content) */
+export function getSparkLessonBySlug(slug: string): any | undefined {
+  return getDb().prepare(
+    'SELECT * FROM spark_lessons WHERE slug = ? AND active = 1'
+  ).get(slug);
+}
+
+/** Get lesson by ID */
+export function getSparkLessonById(id: string): any | undefined {
+  return getDb().prepare(
+    'SELECT * FROM spark_lessons WHERE id = ? AND active = 1'
+  ).get(id);
+}
+
+/** Get user's progress on all lessons (for a specific guide or all) */
+export function getSparkProgress(userId: string, guideId?: string): any[] {
+  if (guideId) {
+    return getDb().prepare(`
+      SELECT sp.*, sl.title, sl.slug, sl.guide_id, sl.xp_reward, sl.difficulty
+      FROM spark_progress sp
+      JOIN spark_lessons sl ON sl.id = sp.lesson_id
+      WHERE sp.user_id = ? AND sl.guide_id = ?
+      ORDER BY sl.sort_order ASC
+    `).all(userId, guideId) as any[];
+  }
+  return getDb().prepare(`
+    SELECT sp.*, sl.title, sl.slug, sl.guide_id, sl.xp_reward, sl.difficulty
+    FROM spark_progress sp
+    JOIN spark_lessons sl ON sl.id = sp.lesson_id
+    WHERE sp.user_id = ?
+    ORDER BY sl.sort_order ASC
+  `).all(userId) as any[];
+}
+
+/** Start or get existing progress for a lesson */
+export function startSparkLesson(userId: string, lessonId: string): any {
+  const existing = getDb().prepare(
+    'SELECT * FROM spark_progress WHERE user_id = ? AND lesson_id = ?'
+  ).get(userId, lessonId);
+  if (existing) return existing;
+
+  const id = uuidv4();
+  const now = Date.now();
+  getDb().prepare(
+    'INSERT INTO spark_progress (id, user_id, lesson_id, status, started_at) VALUES (?, ?, ?, ?, ?)'
+  ).run(id, lessonId, 'started', now);
+  // Fix: user_id and lesson_id were swapped in the INSERT
+  getDb().prepare('DELETE FROM spark_progress WHERE id = ?').run(id);
+  getDb().prepare(
+    'INSERT INTO spark_progress (id, user_id, lesson_id, status, started_at) VALUES (?, ?, ?, ?, ?)'
+  ).run(id, userId, lessonId, 'started', now);
+  return getDb().prepare('SELECT * FROM spark_progress WHERE id = ?').get(id);
+}
+
+/** Update lesson progress (complete a stage) */
+export function updateSparkProgress(userId: string, lessonId: string, stage: 'hook' | 'adventure' | 'reflection', reflectionAnswer?: string): any {
+  const col = stage === 'hook' ? 'hook_completed' : stage === 'adventure' ? 'adventure_completed' : 'reflection_completed';
+  const updates: string[] = [`${col} = 1`];
+  const params: any[] = [];
+
+  if (stage === 'reflection' && reflectionAnswer) {
+    updates.push('reflection_answer = ?');
+    params.push(reflectionAnswer);
+  }
+
+  params.push(userId, lessonId);
+  getDb().prepare(
+    `UPDATE spark_progress SET ${updates.join(', ')} WHERE user_id = ? AND lesson_id = ?`
+  ).run(...params);
+
+  return getDb().prepare(
+    'SELECT * FROM spark_progress WHERE user_id = ? AND lesson_id = ?'
+  ).get(userId, lessonId);
+}
+
+/** Complete a Spark lesson and award XP (Trust Tokens) */
+export function completeSparkLesson(userId: string, lessonId: string, timeSpentSeconds: number): { xpAwarded: number; newBalance: number; leveledUp: boolean; newLevel?: number; newTitle?: string } {
+  const db = getDb();
+  const lesson = db.prepare('SELECT xp_reward FROM spark_lessons WHERE id = ?').get(lessonId) as { xp_reward: number } | undefined;
+  if (!lesson) throw new Error('Lesson not found');
+
+  const progress = db.prepare('SELECT * FROM spark_progress WHERE user_id = ? AND lesson_id = ?').get(userId, lessonId) as any;
+  if (!progress) throw new Error('No progress record found');
+  if (progress.status === 'completed') return { xpAwarded: 0, newBalance: 0, leveledUp: false };
+
+  const now = Date.now();
+  const xpAmount = lesson.xp_reward;
+
+  // Mark lesson completed
+  db.prepare(
+    'UPDATE spark_progress SET status = ?, hook_completed = 1, adventure_completed = 1, reflection_completed = 1, xp_awarded = ?, time_spent_seconds = ?, completed_at = ? WHERE user_id = ? AND lesson_id = ?'
+  ).run('completed', xpAmount, timeSpentSeconds, now, userId, lessonId);
+
+  // Award XP + Trust Tokens (spendable_xp)
+  const award = awardXp(userId, xpAmount, 'spark_lesson', `Completed: ${lessonId}`, lessonId);
+
+  // Update spendable_xp
+  db.prepare('UPDATE user_progression SET spendable_xp = spendable_xp + ? WHERE user_id = ?').run(xpAmount, userId);
+  const prog = db.prepare('SELECT spendable_xp, level, title FROM user_progression WHERE user_id = ?').get(userId) as { spendable_xp: number; level: number; title: string };
+
+  return {
+    xpAwarded: xpAmount,
+    newBalance: prog.spendable_xp,
+    leveledUp: award.leveledUp,
+    newLevel: award.leveledUp ? award.newLevel : undefined,
+    newTitle: award.leveledUp ? award.newTitle : undefined
+  };
+}
+
+/** Get Trust Token (spendable_xp) balance */
+export function getTrustTokenBalance(userId: string): number {
+  const row = getDb().prepare('SELECT spendable_xp FROM user_progression WHERE user_id = ?').get(userId) as { spendable_xp: number } | undefined;
+  return row?.spendable_xp ?? 0;
+}
+
+/** Get all active shop items */
+export function getSparkShopItems(category?: string): any[] {
+  if (category) {
+    return getDb().prepare(
+      'SELECT * FROM spark_shop_items WHERE category = ? AND active = 1 ORDER BY price_tt ASC'
+    ).all(category) as any[];
+  }
+  return getDb().prepare(
+    'SELECT * FROM spark_shop_items WHERE active = 1 ORDER BY category, price_tt ASC'
+  ).all() as any[];
+}
+
+/** Purchase a shop item with Trust Tokens */
+export function purchaseSparkItem(userId: string, itemId: string): { success: boolean; error?: string; newBalance?: number } {
+  const db = getDb();
+  const item = db.prepare('SELECT * FROM spark_shop_items WHERE id = ? AND active = 1').get(itemId) as any;
+  if (!item) return { success: false, error: 'Item not found' };
+
+  // Check if already purchased (for unique items)
+  const alreadyOwned = db.prepare('SELECT id FROM spark_purchases WHERE user_id = ? AND item_id = ?').get(userId, itemId);
+  if (alreadyOwned) return { success: false, error: 'Already owned' };
+
+  const prog = db.prepare('SELECT spendable_xp, level, selected_guide FROM user_progression WHERE user_id = ?').get(userId) as any;
+  if (!prog) return { success: false, error: 'No progression record' };
+
+  // Check balance
+  if (prog.spendable_xp < item.price_tt) return { success: false, error: 'Insufficient Trust Tokens' };
+
+  // Check level requirement
+  if (prog.level < item.level_requirement) return { success: false, error: `Requires level ${item.level_requirement}` };
+
+  // Check guide requirement
+  if (item.guide_requirement && prog.selected_guide !== item.guide_requirement.replace('guide-', '')) {
+    return { success: false, error: `Requires ${item.guide_requirement.replace('guide-', '')} path` };
+  }
+
+  // Check stock
+  if (item.limited_stock !== null && item.sold_count >= item.limited_stock) {
+    return { success: false, error: 'Out of stock' };
+  }
+
+  const now = Date.now();
+  const newBalance = prog.spendable_xp - item.price_tt;
+
+  // Deduct Trust Tokens
+  db.prepare('UPDATE user_progression SET spendable_xp = ? WHERE user_id = ?').run(newBalance, userId);
+
+  // Record purchase
+  db.prepare(
+    'INSERT INTO spark_purchases (id, user_id, item_id, price_tt, balance_after, purchased_at) VALUES (?, ?, ?, ?, ?, ?)'
+  ).run(uuidv4(), userId, itemId, item.price_tt, newBalance, now);
+
+  // Update sold count
+  db.prepare('UPDATE spark_shop_items SET sold_count = sold_count + 1 WHERE id = ?').run(itemId);
+
+  return { success: true, newBalance };
+}
+
+/** Get user's purchased items */
+export function getUserPurchases(userId: string): any[] {
+  return getDb().prepare(`
+    SELECT sp.id, sp.item_id, sp.price_tt, sp.purchased_at,
+           si.name, si.description, si.category, si.item_type, si.icon_svg, si.rarity
+    FROM spark_purchases sp
+    JOIN spark_shop_items si ON si.id = sp.item_id
+    WHERE sp.user_id = ?
+    ORDER BY sp.purchased_at DESC
+  `).all(userId) as any[];
+}
+
+/** Get user's avatar configuration */
+export function getSparkAvatar(userId: string): any {
+  let avatar = getDb().prepare('SELECT * FROM spark_avatar WHERE user_id = ?').get(userId);
+  if (!avatar) {
+    getDb().prepare(
+      'INSERT INTO spark_avatar (user_id, avatar_base, updated_at) VALUES (?, ?, ?)'
+    ).run(userId, 'default', Date.now());
+    avatar = getDb().prepare('SELECT * FROM spark_avatar WHERE user_id = ?').get(userId);
+  }
+  return avatar;
+}
+
+/** Equip an item to avatar */
+export function equipSparkItem(userId: string, itemId: string, slot: 'hat' | 'outfit' | 'accessory' | 'background' | 'title'): boolean {
+  // Verify ownership
+  const owned = getDb().prepare('SELECT id FROM spark_purchases WHERE user_id = ? AND item_id = ?').get(userId, itemId);
+  if (!owned) return false;
+
+  // Ensure avatar exists
+  getSparkAvatar(userId);
+
+  const col = `${slot}_item_id`;
+  getDb().prepare(
+    `UPDATE spark_avatar SET ${col} = ?, updated_at = ? WHERE user_id = ?`
+  ).run(itemId, Date.now(), userId);
+  return true;
+}
+
+/** Get Spark stats for a user (overview) */
+export function getSparkStats(userId: string): any {
+  const db = getDb();
+  const prog = db.prepare('SELECT spendable_xp, selected_guide FROM user_progression WHERE user_id = ?').get(userId) as any;
+  const lessonsCompleted = (db.prepare(
+    "SELECT COUNT(*) as cnt FROM spark_progress WHERE user_id = ? AND status = 'completed'"
+  ).get(userId) as { cnt: number }).cnt;
+  const lessonsStarted = (db.prepare(
+    "SELECT COUNT(*) as cnt FROM spark_progress WHERE user_id = ? AND status = 'started'"
+  ).get(userId) as { cnt: number }).cnt;
+  const totalTimeSeconds = (db.prepare(
+    'SELECT COALESCE(SUM(time_spent_seconds), 0) as total FROM spark_progress WHERE user_id = ?'
+  ).get(userId) as { total: number }).total;
+  const itemsOwned = (db.prepare(
+    'SELECT COUNT(*) as cnt FROM spark_purchases WHERE user_id = ?'
+  ).get(userId) as { cnt: number }).cnt;
+
+  return {
+    trustTokens: prog?.spendable_xp ?? 0,
+    selectedGuide: prog?.selected_guide ?? null,
+    lessonsCompleted,
+    lessonsStarted,
+    totalTimeMinutes: Math.round(totalTimeSeconds / 60),
+    itemsOwned
+  };
+}
+
+/** Parent link: connect parent to child account */
+export function createParentLink(parentUserId: string, childUserId: string): string {
+  const id = uuidv4();
+  getDb().prepare(
+    'INSERT INTO spark_parent_links (id, parent_user_id, child_user_id, linked_at) VALUES (?, ?, ?, ?)'
+  ).run(id, parentUserId, childUserId, Date.now());
+  return id;
+}
+
+/** Get parent's linked children */
+export function getParentChildren(parentUserId: string): any[] {
+  return getDb().prepare(`
+    SELECT spl.child_user_id, spl.permissions, spl.daily_time_limit_minutes, spl.linked_at,
+           u.name, u.email,
+           up.level, up.xp_total, up.spendable_xp, up.selected_guide
+    FROM spark_parent_links spl
+    JOIN users u ON u.id = spl.child_user_id
+    LEFT JOIN user_progression up ON up.user_id = spl.child_user_id
+    WHERE spl.parent_user_id = ? AND spl.active = 1
+  `).all(parentUserId) as any[];
+}
+
+/** Get child's parent link (for permission checks) */
+export function getChildParentLink(childUserId: string): any | undefined {
+  return getDb().prepare(
+    'SELECT * FROM spark_parent_links WHERE child_user_id = ? AND active = 1'
+  ).get(childUserId);
 }
