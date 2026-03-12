@@ -598,10 +598,22 @@ router.post('/listings/:id/resync', requireAuth, (req: Request, res: Response) =
 });
 
 // ─── POST /listings/refresh-images — Re-scrape eBay images for stale listings ──
+// Admins can specify targetUserId to refresh images for any user
 router.post('/listings/refresh-images', requireAuth, async (req: Request, res: Response) => {
   try {
-    const userId = (req as any).user.sub;
-    const { listingIds } = req.body; // optional: array of specific listing IDs
+    const callerUserId = (req as any).user.sub;
+    const { listingIds, targetUserId } = req.body;
+
+    // Determine whose listings to refresh
+    let userId = callerUserId;
+    if (targetUserId && targetUserId !== callerUserId) {
+      // Only admins can refresh other users' listings
+      const caller = getDb().prepare('SELECT role FROM users WHERE id = ?').get(callerUserId) as any;
+      if (!caller || caller.role !== 'admin') {
+        return res.status(403).json({ success: false, error: 'Admin access required to refresh other users listings' });
+      }
+      userId = targetUserId;
+    }
 
     // Validate
     if (listingIds && (!Array.isArray(listingIds) || listingIds.length > 100)) {
