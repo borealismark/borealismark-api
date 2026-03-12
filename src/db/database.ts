@@ -5308,11 +5308,6 @@ export function startSparkLesson(userId: string, lessonId: string): any {
   const now = Date.now();
   getDb().prepare(
     'INSERT INTO spark_progress (id, user_id, lesson_id, status, started_at) VALUES (?, ?, ?, ?, ?)'
-  ).run(id, lessonId, 'started', now);
-  // Fix: user_id and lesson_id were swapped in the INSERT
-  getDb().prepare('DELETE FROM spark_progress WHERE id = ?').run(id);
-  getDb().prepare(
-    'INSERT INTO spark_progress (id, user_id, lesson_id, status, started_at) VALUES (?, ?, ?, ?, ?)'
   ).run(id, userId, lessonId, 'started', now);
   return getDb().prepare('SELECT * FROM spark_progress WHERE id = ?').get(id);
 }
