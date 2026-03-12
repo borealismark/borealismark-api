@@ -266,6 +266,40 @@ export function getAgentSummary(userId: string): { active: number; completed: nu
   return { active, completed, totalCampaigns, totalClicks };
 }
 
+/**
+ * Log an AI agent activity to the agent_tasks table.
+ * Called by any service (import, marketing, sync, etc.) to record what the agent did.
+ * Returns the activity log ID.
+ */
+export function logListingActivity(params: {
+  listingId: string;
+  userId: string;
+  agentName: string;
+  taskType: string;  // 'migration_import' | 'migration_sync' | 'marketing' | 'price_update' | etc.
+  platform?: string;
+  status: string;
+  statusMessage: string;
+  metadata?: Record<string, any>;
+}): string {
+  const db = getDb();
+  const id = uuid();
+  const now = new Date().toISOString();
+
+  db.prepare(`
+    INSERT INTO agent_tasks (id, listing_id, user_id, agent_name, task_type, platform, status, status_message, result_data, started_at, updated_at, completed_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    id, params.listingId, params.userId, params.agentName,
+    params.taskType, params.platform || null,
+    params.status, params.statusMessage,
+    JSON.stringify(params.metadata || {}),
+    now, now,
+    params.status === 'completed' ? now : null
+  );
+
+  return id;
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }

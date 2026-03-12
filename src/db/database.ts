@@ -1227,6 +1227,43 @@ function initSchema(db: Database.Database): void {
     }
   }
 
+  // ── Clean up mock marketing tasks and backfill Migration Officer activity for imported listings
+  const hasBackfilledMigration = (db.prepare(
+    "SELECT COUNT(*) as cnt FROM agent_tasks WHERE agent_name = 'Migration Officer' AND task_type = 'migration_import'"
+  ).get() as any).cnt;
+
+  if (hasBackfilledMigration === 0) {
+    // Remove auto-generated Polaris/marketing tasks for imported listings
+    db.exec(`
+      DELETE FROM agent_tasks WHERE listing_id IN (
+        SELECT id FROM marketplace_listings WHERE origin = 'imported'
+      ) AND task_type = 'marketing'
+    `);
+
+    // Backfill Migration Officer activity for all existing imported listings
+    const importedListings = db.prepare(`
+      SELECT id, user_id, external_url, title FROM marketplace_listings WHERE origin = 'imported'
+    `).all() as any[];
+
+    const now = new Date().toISOString();
+    const insertActivity = db.prepare(`
+      INSERT INTO agent_tasks (id, listing_id, user_id, agent_name, task_type, platform, status, status_message, result_data, started_at, updated_at, completed_at)
+      VALUES (?, ?, ?, 'Migration Officer', 'migration_import', 'ebay', 'completed', ?, ?, ?, ?, ?)
+    `);
+
+    for (const listing of importedListings) {
+      const actId = uuidv4();
+      insertActivity.run(
+        actId, listing.id, listing.user_id,
+        'Imported from eBay — listing migrated with images, pricing, and condition tags',
+        JSON.stringify({ source: 'ebay', externalUrl: listing.external_url || '', originalTitle: listing.title }),
+        now, now, now
+      );
+    }
+
+    logger.info(`[Migration] Backfilled ${importedListings.length} Migration Officer activity records`);
+  }
+
   // Ensure the master API key exists with full admin scopes
   const masterKey = process.env.API_MASTER_KEY;
   if (!masterKey) {

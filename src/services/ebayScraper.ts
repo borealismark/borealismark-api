@@ -10,6 +10,7 @@ import https from 'https';
 import { v4 as uuid } from 'uuid';
 import { getDb } from '../db/database';
 import { logger } from '../middleware/logger';
+import { logListingActivity } from './agentWorker';
 
 const DELAY_MS = 600; // delay between eBay requests to be polite
 const MAX_PAGES = 50; // max store pages to scrape (200 items/page = 10,000 max)
@@ -304,6 +305,18 @@ export async function importEbayStore(
           listing.shippingCostCad, imagesJson,
           listing.ebayUrl, now, now, now, now
         );
+
+        // Log Migration Officer activity for this imported listing
+        logListingActivity({
+          listingId: listingId,
+          userId: userId,
+          agentName: 'Migration Officer',
+          taskType: 'migration_import',
+          platform: 'ebay',
+          status: 'completed',
+          statusMessage: 'Imported from eBay — listing migrated with images, pricing, and condition tags',
+          metadata: { source: 'ebay', externalUrl: listing.ebayUrl, originalTitle: listing.title }
+        });
 
         imported++;
         db.prepare('UPDATE ebay_store_imports SET listings_imported = ? WHERE id = ?').run(imported, importId);
