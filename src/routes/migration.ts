@@ -35,7 +35,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { requireAuth, type AuthRequest } from './auth';
 import { logger } from '../middleware/logger';
 import { getDb, computeAndStoreTrustScore } from '../db/database';
-import { importEbayStore } from '../services/ebayScraper';
+import { importEbayStore, refreshListingImages } from '../services/ebayScraper';
 
 const router = Router();
 
@@ -593,6 +593,31 @@ router.post('/listings/:id/resync', requireAuth, (req: Request, res: Response) =
     });
   } catch (err: any) {
     logger.error('Error resyncing listing', { error: err.message });
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+// ─── POST /listings/refresh-images — Re-scrape eBay images for stale listings ──
+router.post('/listings/refresh-images', requireAuth, async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).user.sub;
+    const { listingIds } = req.body; // optional: array of specific listing IDs
+
+    // Validate
+    if (listingIds && (!Array.isArray(listingIds) || listingIds.length > 100)) {
+      return res.status(400).json({ success: false, error: 'listingIds must be an array with max 100 items' });
+    }
+
+    // Run refresh (this may take a while with 600ms delays)
+    const result = await refreshListingImages(userId, listingIds);
+
+    return res.json({
+      success: true,
+      message: `Image refresh complete: ${result.refreshed} refreshed, ${result.failed} failed, ${result.skipped} skipped`,
+      data: result,
+    });
+  } catch (err: any) {
+    logger.error('Error refreshing listing images', { error: err.message });
     return res.status(500).json({ success: false, error: 'Internal server error' });
   }
 });

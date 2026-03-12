@@ -211,6 +211,85 @@ export async function scrapeListingPage(itemUrl: string): Promise<ScrapedListing
 }
 
 /**
+ * Re-scrape eBay listings to refresh images that have gone stale (eBay placeholder).
+ * Accepts an array of listing IDs, fetches their external_url, re-scrapes for images,
+ * and updates the DB. Returns counts of refreshed/failed.
+ */
+export async function refreshListingImages(
+  userId: string,
+  listingIds?: string[]
+): Promise<{ refreshed: number; failed: number; skipped: number; details: Array<{ id: string; title: string; status: string; imageCount?: number }> }> {
+  const db = getDb();
+  const now = Date.now();
+
+  // If no specific IDs, find all imported listings for this user with potential stale images
+  let listings: any[];
+  if (listingIds && listingIds.length > 0) {
+    const placeholders = listingIds.map(() => '?').join(',');
+    listings = db.prepare(
+      `SELECT id, title, external_url, images FROM marketplace_listings
+       WHERE id IN (${placeholders}) AND user_id = ? AND origin = 'imported' AND status = 'active'`
+    ).all(...listingIds, userId) as any[];
+  } else {
+    listings = db.prepare(
+      `SELECT id, title, external_url, images FROM marketplace_listings
+       WHERE user_id = ? AND origin = 'imported' AND status = 'active' AND external_url IS NOT NULL`
+    ).all(userId) as any[];
+  }
+
+  let refreshed = 0;
+  let failed = 0;
+  let skipped = 0;
+  const details: Array<{ id: string; title: string; status: string; imageCount?: number }> = [];
+
+  for (const listing of listings) {
+    if (!listing.external_url) {
+      skipped++;
+      details.push({ id: listing.id, title: listing.title, status: 'skipped_no_url' });
+      continue;
+    }
+
+    try {
+      // Polite delay between requests
+      await new Promise(resolve => setTimeout(resolve, DELAY_MS));
+
+      const scraped = await scrapeListingPage(listing.external_url);
+      if (!scraped || scraped.images.length === 0) {
+        failed++;
+        details.push({ id: listing.id, title: listing.title, status: 'no_images_found' });
+        continue;
+      }
+
+      // Update images in DB
+      db.prepare(
+        'UPDATE marketplace_listings SET images = ?, updated_at = ? WHERE id = ?'
+      ).run(JSON.stringify(scraped.images), now, listing.id);
+
+      // Log Migration Officer activity
+      logListingActivity({
+        listingId: listing.id,
+        userId: userId,
+        agentName: 'Migration Officer',
+        taskType: 'migration_sync',
+        platform: 'ebay',
+        status: 'completed',
+        statusMessage: `Image refresh — re-scraped ${scraped.images.length} images from eBay`,
+        metadata: { action: 'image_refresh', imageCount: scraped.images.length, source: listing.external_url }
+      });
+
+      refreshed++;
+      details.push({ id: listing.id, title: listing.title, status: 'refreshed', imageCount: scraped.images.length });
+    } catch (err: any) {
+      failed++;
+      details.push({ id: listing.id, title: listing.title, status: 'error: ' + err.message?.substring(0, 60) });
+    }
+  }
+
+  logger.info(`[Migration Officer] Image refresh complete: ${refreshed} refreshed, ${failed} failed, ${skipped} skipped`);
+  return { refreshed, failed, skipped, details };
+}
+
+/**
  * Full import flow: scrape store, create storefront, import all listings.
  */
 export async function importEbayStore(
