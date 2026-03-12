@@ -1701,6 +1701,48 @@ function initSchema(db: Database.Database): void {
     );
   `);
 
+  // ─── Debate Pipeline Tables ──────────────────────────────────────────────────
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS debate_sources (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      source_url TEXT NOT NULL UNIQUE,
+      source_name TEXT NOT NULL,
+      author TEXT,
+      published_at INTEGER,
+      fetched_at INTEGER NOT NULL,
+      topic_tags TEXT DEFAULT '[]',
+      used_in_debate INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_debate_sources_fetched ON debate_sources(fetched_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_debate_sources_used ON debate_sources(used_in_debate);
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS debates (
+      id TEXT PRIMARY KEY,
+      topic TEXT NOT NULL,
+      question TEXT NOT NULL,
+      summary TEXT,
+      source_article_id TEXT,
+      source_url TEXT,
+      source_name TEXT,
+      source_title TEXT,
+      exchanges TEXT NOT NULL DEFAULT '[]',
+      status TEXT NOT NULL DEFAULT 'draft',
+      published INTEGER NOT NULL DEFAULT 0,
+      featured INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      published_at INTEGER,
+      FOREIGN KEY (source_article_id) REFERENCES debate_sources(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_debates_featured ON debates(featured, published_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_debates_status ON debates(status);
+    CREATE INDEX IF NOT EXISTS idx_debates_created ON debates(created_at DESC);
+  `);
+
   // Seed the three Trust Guides if they don't exist
   {
     const guideCount = (db.prepare("SELECT COUNT(*) as cnt FROM spark_guides").get() as { cnt: number }).cnt;
@@ -5525,4 +5567,96 @@ export function getChildParentLink(childUserId: string): any | undefined {
   return getDb().prepare(
     'SELECT * FROM spark_parent_links WHERE child_user_id = ? AND active = 1'
   ).get(childUserId);
+}
+
+// ─── Debate Pipeline Functions ───────────────────────────────────────────────
+
+/** Insert a source article from RSS ingestion */
+export function insertDebateSource(source: {
+  id: string; title: string; summary: string; source_url: string;
+  source_name: string; author?: string; published_at?: number; topic_tags?: string[];
+}): boolean {
+  try {
+    getDb().prepare(`
+      INSERT OR IGNORE INTO debate_sources (id, title, summary, source_url, source_name, author, published_at, fetched_at, topic_tags)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      source.id, source.title, source.summary, source.source_url,
+      source.source_name, source.author || null, source.published_at || Date.now(),
+      Date.now(), JSON.stringify(source.topic_tags || [])
+    );
+    return true;
+  } catch { return false; }
+}
+
+/** Get recent unused source articles */
+export function getUnusedSources(limit = 10): any[] {
+  return getDb().prepare(
+    'SELECT * FROM debate_sources WHERE used_in_debate = 0 ORDER BY published_at DESC LIMIT ?'
+  ).all(limit) as any[];
+}
+
+/** Mark source as used in a debate */
+export function markSourceUsed(sourceId: string): void {
+  getDb().prepare('UPDATE debate_sources SET used_in_debate = 1 WHERE id = ?').run(sourceId);
+}
+
+/** Insert a generated debate */
+export function insertDebate(debate: {
+  id: string; topic: string; question: string; summary?: string;
+  source_article_id?: string; source_url?: string; source_name?: string;
+  source_title?: string; exchanges: any[]; status?: string;
+  published?: number; featured?: number;
+}): void {
+  getDb().prepare(`
+    INSERT INTO debates (id, topic, question, summary, source_article_id, source_url, source_name, source_title, exchanges, status, published, featured, created_at, published_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    debate.id, debate.topic, debate.question, debate.summary || null,
+    debate.source_article_id || null, debate.source_url || null,
+    debate.source_name || null, debate.source_title || null,
+    JSON.stringify(debate.exchanges), debate.status || 'published',
+    debate.published ?? 1, debate.featured ?? 1,
+    Date.now(), debate.published ? Date.now() : null
+  );
+}
+
+/** Get the latest featured debate */
+export function getLatestDebate(): any | undefined {
+  const row = getDb().prepare(
+    'SELECT * FROM debates WHERE published = 1 AND featured = 1 ORDER BY published_at DESC LIMIT 1'
+  ).get() as any;
+  if (row) {
+    row.exchanges = JSON.parse(row.exchanges || '[]');
+  }
+  return row;
+}
+
+/** Get a specific debate by ID */
+export function getDebateById(id: string): any | undefined {
+  const row = getDb().prepare('SELECT * FROM debates WHERE id = ?').get(id) as any;
+  if (row) {
+    row.exchanges = JSON.parse(row.exchanges || '[]');
+  }
+  return row;
+}
+
+/** List recent debates */
+export function listDebates(limit = 10, offset = 0): any[] {
+  const rows = getDb().prepare(
+    'SELECT id, topic, question, summary, source_name, source_title, status, published, featured, created_at, published_at FROM debates ORDER BY created_at DESC LIMIT ? OFFSET ?'
+  ).all(limit, offset) as any[];
+  return rows;
+}
+
+/** Get recent debate sources */
+export function listDebateSources(limit = 20): any[] {
+  return getDb().prepare(
+    'SELECT * FROM debate_sources ORDER BY fetched_at DESC LIMIT ?'
+  ).all(limit) as any[];
+}
+
+/** Unflag all featured debates (before setting a new one) */
+export function clearFeaturedDebates(): void {
+  getDb().prepare('UPDATE debates SET featured = 0 WHERE featured = 1').run();
 }
