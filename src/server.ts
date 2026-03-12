@@ -165,6 +165,7 @@ app.use(cors({
       'https://borealismark.com', 'https://www.borealismark.com',
       'https://borealisterminal.com', 'https://www.borealisterminal.com',
       'https://borealisprotocol.ai', 'https://www.borealisprotocol.ai',
+      'https://borealisacademy.com', 'https://www.borealisacademy.com',
     ];
     // Allow exact localhost/127.0.0.1 with any port (strict regex to prevent localhost.evil.com)
     const localhostRegex = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;
